@@ -7,7 +7,7 @@
 <style>
   html, body { margin: 0; padding: 0; background: #12151B; }
   #root { min-height: 100vh; }
-  #boot-msg { color: #8792A2; font-family: -apple-system, sans-serif; padding: 40px; text-align: center; line-height: 1.7; max-width: 560px; margin: 0 auto; }
+  #boot-msg { color: #8792A2; font-family: -apple-system, sans-serif; padding: 40px; text-align: center; line-height: 1.7; max-width: 560px; margin: 0 auto; white-space: pre-wrap; }
   #boot-msg code { background: #1D222C; padding: 2px 6px; border-radius: 4px; }
 </style>
 </head>
@@ -15,16 +15,27 @@
 <div id="root"><div id="boot-msg">불러오는 중...</div></div>
 
 <script>
+  // Global safety net: if ANYTHING throws before the React app takes over,
+  // show the real error message instead of leaving a blank/black screen.
+  function showBootError(msg) {
+    var el = document.getElementById("boot-msg");
+    if (el && !window.__PORTFOLIO_APP_STARTED__) {
+      el.innerHTML = "\u26a0\ufe0f \uc624\ub958\uac00 \ubc1c\uc0dd\ud588\uc5b4\uc694:<br/><br/>" + msg +
+        "<br/><br/>F12 \ub204\ub974\uba74 \ub098\uc624\ub294 \uac1c\ubc1c\uc790 \ub3c4\uad6c\uc758 Console \ud0ed\uc5d0\uc11c \ub354 \uc790\uc138\ud55c \ub0b4\uc6a9\uc744 \ubcfc \uc218 \uc788\uc5b4\uc694.";
+    }
+  }
+  window.addEventListener("error", function (e) {
+    showBootError((e.message || "알 수 없는 오류") + (e.filename ? " (" + e.filename.split("/").pop() + ":" + e.lineno + ")" : ""));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    showBootError("Promise 오류: " + (e.reason && e.reason.message ? e.reason.message : e.reason));
+  });
   setTimeout(function () {
     if (!window.__PORTFOLIO_APP_STARTED__) {
-      var el = document.getElementById("boot-msg");
-      if (el) {
-        el.innerHTML =
-          "필요한 라이브러리를 아직 불러오지 못했어요.<br/><br/>" +
-          "1) 인터넷 연결을 확인해주세요<br/>" +
-          "2) 브라우저 개발자 도구(F12) \u2192 Console 탭에서 어떤 오류가 보이는지 확인해주세요<br/>" +
-          "3) 이 파일 상단의 Firebase 설정(firebaseConfig)을 본인 프로젝트 값으로 채워 넣었는지 확인해주세요.";
-      }
+      showBootError(
+        "필요한 라이브러리를 아직 불러오지 못했어요.<br/>1) 인터넷 연결을 확인해주세요<br/>" +
+        "2) 이 파일 상단의 Firebase 설정(firebaseConfig)을 본인 프로젝트 값으로 정확히 채워 넣었는지 확인해주세요."
+      );
     }
   }, 12000);
 </script>
@@ -37,15 +48,23 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script>
-const firebaseConfig = {
-  apiKey: "AIzaSyDBm4vdTPyI4aG4hKhh_D1wWtlvm7LtTgE",
-  authDomain: "asset-tracker-app-572c3.firebaseapp.com",
-  projectId: "asset-tracker-app-572c3",
-  storageBucket: "asset-tracker-app-572c3.firebasestorage.app",
-  messagingSenderId: "1027483241637",
-  appId: "1:1027483241637:web:694236cb2794f76b92514c"
-};
-  firebase.initializeApp(firebaseConfig);
+  const firebaseConfig = {
+    apiKey: "AIzaSyDBm4vdTPyI4aG4hKhh_D1wWtlvm7LtTgE",
+    authDomain: "asset-tracker-app-572c3.firebaseapp.com",
+    projectId: "asset-tracker-app-572c3",
+    storageBucket: "asset-tracker-app-572c3.firebasestorage.app",
+    messagingSenderId: "1027483241637",
+    appId: "1:1027483241637:web:694236cb2794f76b92514c"
+  };
+  try {
+    if (firebaseConfig.apiKey === "YOUR_API_KEY") {
+      showBootError("firebaseConfig \uac12\uc774 \uc544\uc9c1 \uae30\ubcf8\uac12(YOUR_API_KEY \ub4f1)\uc73c\ub85c \ub0a8\uc544\uc788\uc5b4\uc694. index.html \uc0c1\ub2e8\uc758 firebaseConfig\ub97c \ubcf8\uc778\uc758 Firebase \ud504\ub85c\uc81d\ud2b8 \uac12\uc73c\ub85c \uad50\uccb4\ud574\uc8fc\uc138\uc694.");
+    } else {
+      firebase.initializeApp(firebaseConfig);
+    }
+  } catch (e) {
+    showBootError("Firebase 초기화 실패: " + e.message);
+  }
 </script>
 
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -163,32 +182,29 @@ function dateRange(startStr, endStr) {
 function tickInterval(len) {
     return Math.max(0, Math.ceil(len / 10) - 1);
 }
-// ---------- FREE public-API lookup (no Claude tokens) — tried first ----------
-// Same approach used in the standalone build: Yahoo Finance's unofficial
-// chart endpoint (via CORS proxies) for prices, and open.er-api.com /
-// Frankfurter for FX. If this sandbox's network doesn't allow reaching these
-// domains, every call below will just throw quickly and the code falls back
-// to the Claude+web-search method automatically — no behavior is lost, it's
-// purely a token-saving first attempt.
+// ---------- FREE public-API lookup (no Claude tokens) ----------
+// Yahoo Finance's unofficial chart endpoint (via CORS proxies) for prices,
+// and open.er-api.com / Frankfurter for FX.
 const CORS_PROXIES = [
     (url) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
     (url) => "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(url),
-    (url) => "https://corsproxy.io/?url=" + encodeURIComponent(url)
+    (url) => "https://corsproxy.io/?url=" + encodeURIComponent(url),
+    (url) => "https://proxy.corsfix.com/?" + url
 ];
 async function fetchViaProxies(url) {
-    let lastErr;
+    const attempts = [];
     for (let i = 0; i < CORS_PROXIES.length; i++) {
         try {
             const res = await fetch(CORS_PROXIES[i](url));
             if (res.ok)
                 return res;
-            lastErr = new Error("HTTP " + res.status);
+            attempts.push(`프록시${i + 1}: HTTP ${res.status}`);
         }
         catch (e) {
-            lastErr = e;
+            attempts.push(`프록시${i + 1}: ${e.message}`);
         }
     }
-    throw lastErr || new Error("모든 프록시 요청이 실패했습니다");
+    throw new Error("모든 프록시 실패 [" + attempts.join(" / ") + "]");
 }
 function isKoreanTicker(ticker) {
     return /^\d{5,6}$/.test(ticker);
@@ -206,12 +222,19 @@ async function fetchYahooClose(yTicker, dateStr) {
             throw new Error("HTTP " + res.status);
     }
     catch (e) {
-        res = await fetchViaProxies(yahooUrl);
+        try {
+            res = await fetchViaProxies(yahooUrl);
+        }
+        catch (proxyErr) {
+            throw new Error(`[Yahoo:${yTicker}] 직접 요청 실패(${e.message}), ${proxyErr.message}`);
+        }
     }
     const data = await res.json();
     const result = data.chart && data.chart.result && data.chart.result[0];
-    if (!result || !result.timestamp)
-        throw new Error("no data");
+    if (!result || !result.timestamp) {
+        const err = data.chart && data.chart.error;
+        throw new Error(`[Yahoo:${yTicker}] 데이터 없음` + (err ? ` (${err.description || err.code})` : ""));
+    }
     const timestamps = result.timestamp;
     const closes = (result.indicators.quote && result.indicators.quote[0].close) || [];
     let bestIdx = -1;
@@ -223,7 +246,7 @@ async function fetchYahooClose(yTicker, dateStr) {
             bestIdx = i;
     }
     if (bestIdx === -1)
-        throw new Error("no usable close");
+        throw new Error(`[Yahoo:${yTicker}] 사용 가능한 종가 없음`);
     const resolvedDate = new Date(timestamps[bestIdx] * 1000).toISOString().slice(0, 10);
     return { date: resolvedDate, close: closes[bestIdx] };
 }
@@ -232,7 +255,12 @@ async function fetchKoreanClose(code, dateStr) {
         return await fetchYahooClose(code + ".KS", dateStr);
     }
     catch (e) {
-        return await fetchYahooClose(code + ".KQ", dateStr);
+        try {
+            return await fetchYahooClose(code + ".KQ", dateStr);
+        }
+        catch (e2) {
+            throw new Error(`${e.message} / ${e2.message}`);
+        }
     }
 }
 async function freeFxRate(dateStr) {
@@ -247,7 +275,7 @@ async function freeFxRate(dateStr) {
                     return { date: dateStr, fx: Number(fx) };
             }
         }
-        catch (e) { /* fall through */ }
+        catch (e) { /* fall through to Frankfurter */ }
     }
     const url = isToday
         ? `https://api.frankfurter.app/latest?from=USD&to=KRW`
@@ -259,12 +287,17 @@ async function freeFxRate(dateStr) {
             throw new Error("HTTP " + res.status);
     }
     catch (e) {
-        res = await fetchViaProxies(url);
+        try {
+            res = await fetchViaProxies(url);
+        }
+        catch (proxyErr) {
+            throw new Error(`[FX] 직접 요청 실패(${e.message}), ${proxyErr.message}`);
+        }
     }
     const data = await res.json();
     const fx = data.rates && data.rates.KRW;
     if (!fx)
-        throw new Error("no fx data");
+        throw new Error("[FX] 환율 데이터 없음");
     return { date: data.date || dateStr, fx: Number(fx) };
 }
 async function freePriceLookup(ticker, dateStr) {
@@ -2135,9 +2168,19 @@ function AuthGate() {
     const [password, setPassword] = useState("");
     const [authError, setAuthError] = useState("");
     const [authBusy, setAuthBusy] = useState(false);
+    const [fatalError, setFatalError] = useState("");
     useEffect(() => {
-        const unsub = firebase.auth().onAuthStateChanged((u) => setUser(u || null));
-        return unsub;
+        if (typeof firebase === "undefined") {
+            setFatalError("Firebase 라이브러리를 불러오지 못했어요. 인터넷 연결을 확인하거나 잠시 후 새로고침 해주세요.");
+            return;
+        }
+        try {
+            const unsub = firebase.auth().onAuthStateChanged((u) => setUser(u || null), (err) => setFatalError("로그인 상태 확인 중 오류: " + err.message));
+            return unsub;
+        }
+        catch (e) {
+            setFatalError("Firebase 초기화에 실패했어요. index.html 상단의 firebaseConfig 값이 본인의 실제 Firebase 프로젝트 설정과 정확히 일치하는지 확인해주세요.\n\n오류 내용: " + e.message);
+        }
     }, []);
     // Wire up window.storage to Firestore SYNCHRONOUSLY (not in a useEffect) —
     // this must be ready before <PortfolioTracker> mounts and runs its own
@@ -2148,7 +2191,7 @@ function AuthGate() {
     // one "meta" doc for the account list/fx cache) instead of one giant
     // document, since a single Firestore doc is capped at ~1MB — a portfolio
     // with thousands of transactions can get close to that in one blob.
-    if (user) {
+    if (user && !fatalError) {
         const userRoot = firebase.firestore().collection("portfolioApp").doc(user.uid);
         const metaRef = userRoot.collection("meta").doc("main");
         const accountsColl = userRoot.collection("accounts");
@@ -2173,15 +2216,21 @@ function AuthGate() {
                 return { key, value };
             },
             set: async (key, value) => {
-                const parsed = JSON.parse(value);
-                const { accounts: accList = [], activeAccountId: activeId, accountData = {}, fxCache = {} } = parsed;
-                const batch = firebase.firestore().batch();
-                batch.set(metaRef, { accounts: accList, activeAccountId: activeId, fxCache }, { merge: false });
-                for (const accId of Object.keys(accountData)) {
-                    batch.set(accountsColl.doc(accId), accountData[accId] || {}, { merge: false });
+                try {
+                    const parsed = JSON.parse(value);
+                    const { accounts: accList = [], activeAccountId: activeId, accountData = {}, fxCache = {} } = parsed;
+                    const batch = firebase.firestore().batch();
+                    batch.set(metaRef, { accounts: accList, activeAccountId: activeId, fxCache }, { merge: false });
+                    for (const accId of Object.keys(accountData)) {
+                        batch.set(accountsColl.doc(accId), accountData[accId] || {}, { merge: false });
+                    }
+                    await batch.commit();
+                    return { key, value };
                 }
-                await batch.commit();
-                return { key, value };
+                catch (e) {
+                    console.error("Firestore 저장 실패:", e);
+                    throw e;
+                }
             }
         };
     }
@@ -2202,6 +2251,15 @@ function AuthGate() {
         }
     };
     const handleSignOut = () => firebase.auth().signOut();
+    if (fatalError) {
+        return (React.createElement("div", { style: {
+                minHeight: "100vh", background: "#12151B", color: "#E8ECF3", display: "flex", alignItems: "center", justifyContent: "center",
+                fontFamily: "-apple-system, sans-serif", padding: 24
+            } },
+            React.createElement("div", { style: { maxWidth: 480, background: "#171B23", border: "1px solid #FF6B6B55", borderRadius: 8, padding: 24, whiteSpace: "pre-wrap", lineHeight: 1.6 } },
+                React.createElement("div", { style: { color: "#FF6B6B", fontWeight: 700, marginBottom: 8 } }, "\u26A0\uFE0F \uC124\uC815 \uC624\uB958"),
+                fatalError)));
+    }
     if (user === undefined) {
         return (React.createElement("div", { style: { minHeight: "100vh", background: "#12151B", color: "#8792A2", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "-apple-system, sans-serif" } }, "\uD655\uC778 \uC911..."));
     }
@@ -2228,8 +2286,34 @@ function AuthGate() {
     }
     return React.createElement(PortfolioTracker, { onSignOut: handleSignOut, userEmail: user.email });
 }
+class ErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { error: null };
+    }
+    static getDerivedStateFromError(error) {
+        return { error };
+    }
+    componentDidCatch(error, info) {
+        console.error("App crashed:", error, info);
+    }
+    render() {
+        if (this.state.error) {
+            return (React.createElement("div", { style: {
+                    minHeight: "100vh", background: "#12151B", color: "#E8ECF3", display: "flex", alignItems: "center", justifyContent: "center",
+                    fontFamily: "-apple-system, sans-serif", padding: 24
+                } },
+                React.createElement("div", { style: { maxWidth: 520, background: "#171B23", border: "1px solid #FF6B6B55", borderRadius: 8, padding: 24, lineHeight: 1.6 } },
+                    React.createElement("div", { style: { color: "#FF6B6B", fontWeight: 700, marginBottom: 8 } }, "\u26A0\uFE0F \uC608\uC0C1\uCE58 \uBABB\uD55C \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC5B4\uC694"),
+                    React.createElement("div", { style: { fontSize: 13, color: "#8792A2", marginBottom: 10 } }, "\uBE0C\uB77C\uC6B0\uC800 \uAC1C\uBC1C\uC790 \uB3C4\uAD6C(F12) \u2192 Console \uD0ED\uC5D0\uC11C \uC790\uC138\uD55C \uC624\uB958 \uB0B4\uC6A9\uC744 \uD655\uC778\uD574\uC8FC\uC138\uC694."),
+                    React.createElement("div", { className: "mono", style: { fontSize: 12, color: "#FF6B6B", whiteSpace: "pre-wrap" } }, String(this.state.error && this.state.error.message)))));
+        }
+        return this.props.children;
+    }
+}
 const rootEl = document.getElementById("root");
-ReactDOM.createRoot(rootEl).render(React.createElement(AuthGate, null));
+ReactDOM.createRoot(rootEl).render(React.createElement(ErrorBoundary, null,
+    React.createElement(AuthGate, null)));
 
 </script>
 </body>
