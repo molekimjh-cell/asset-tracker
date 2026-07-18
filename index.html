@@ -119,6 +119,7 @@ const GAIN = "#3FCB9B";
 const LOSS = "#FF6B6B";
 const DIV_COLOR = "#5FB0E8"; // dividend accent (cool blue, distinct from gain/loss)
 const CASH_COLOR = "#B48EED"; // account cash accent (violet, distinct from dividend blue)
+const INTEREST_COLOR = "#3FB8A8"; // interest income accent (teal, distinct from all the above)
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const fmtUSD = (n) => {
@@ -289,12 +290,13 @@ async function fetchNaverClose(code) {
     return { date: todayStr(), close: price };
 }
 async function fetchKoreanClose(code, dateStr) {
+    let naverErr = null;
     if (dateStr === todayStr()) {
         try {
             return await fetchNaverClose(code);
         }
         catch (e) {
-            // fall through to Yahoo below
+            naverErr = e; // fall through to Yahoo below, but remember why Naver failed
         }
     }
     try {
@@ -305,7 +307,8 @@ async function fetchKoreanClose(code, dateStr) {
             return await fetchYahooClose(code + ".KQ", dateStr);
         }
         catch (e2) {
-            throw new Error(`${e.message} / ${e2.message}`);
+            const naverPart = naverErr ? `[Naver] ${naverErr.message} / ` : "";
+            throw new Error(`${naverPart}${e.message} / ${e2.message}`);
         }
     }
 }
@@ -632,6 +635,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const [priceCache, setPriceCache] = useState({}); // key -> {priceUSD, priceKRW, source, fx}
     const [principal, setPrincipal] = useState([]); // {id, date, amountUSD, amountKRW}
     const [dividends, setDividends] = useState([]); // {id, ticker, date, preTaxUSD, preTaxKRW, postTaxUSD, postTaxKRW}
+    const [interestIncome, setInterestIncome] = useState([]); // {id, date, preTaxUSD, preTaxKRW, postTaxUSD, postTaxKRW} - account-level interest, no ticker
     const [cashBalances, setCashBalances] = useState([]); // {id, date, amountUSD, amountKRW} - account cash snapshot on that date
     const [holdingsOrder, setHoldingsOrder] = useState([]); // [ticker, ...] — user's manual display order for the holdings table
     const [fxCache, setFxCache] = useState({}); // { date: usdKrwRate } - accumulated from every price/fx lookup ever made
@@ -659,11 +663,14 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const [dividendForm, setDividendForm] = useState({ ticker: "", date: todayStr(), preTaxUSD: "", preTaxKRW: "", postTaxUSD: "", postTaxKRW: "" });
     const [editingDividendId, setEditingDividendId] = useState(null);
     const [editDividendForm, setEditDividendForm] = useState({ ticker: "", date: "", preTaxUSD: "", preTaxKRW: "", postTaxUSD: "", postTaxKRW: "" });
+    const [interestForm, setInterestForm] = useState({ date: todayStr(), preTaxUSD: "", preTaxKRW: "", postTaxUSD: "", postTaxKRW: "" });
+    const [editingInterestId, setEditingInterestId] = useState(null);
+    const [editInterestForm, setEditInterestForm] = useState({ date: "", preTaxUSD: "", preTaxKRW: "", postTaxUSD: "", postTaxKRW: "" });
     const [cashForm, setCashForm] = useState({ date: todayStr(), amountUSD: "", amountKRW: "" });
     const [editingCashId, setEditingCashId] = useState(null);
     const [editCashForm, setEditCashForm] = useState({ date: "", amountUSD: "", amountKRW: "" });
     // ---- load / save (multi-account) ----
-    const emptySlice = () => ({ transactions: [], priceCache: {}, principal: [], dividends: [], cashBalances: [], holdingsOrder: [] });
+    const emptySlice = () => ({ transactions: [], priceCache: {}, principal: [], dividends: [], interestIncome: [], cashBalances: [], holdingsOrder: [] });
     const [loadError, setLoadError] = useState(null);
     useEffect(() => {
         (async () => {
@@ -707,6 +714,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPriceCache(slice.priceCache || {});
                     setPrincipal(slice.principal || []);
                     setDividends(slice.dividends || []);
+                    setInterestIncome(slice.interestIncome || []);
                     setCashBalances(slice.cashBalances || []);
                     setHoldingsOrder(slice.holdingsOrder || []);
                     setFxCache(parsed.fxCache || {});
@@ -719,6 +727,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                         priceCache: parsed.priceCache || {},
                         principal: parsed.principal || [],
                         dividends: parsed.dividends || [],
+                        interestIncome: parsed.interestIncome || [],
                         cashBalances: parsed.cashBalances || [],
                         holdingsOrder: parsed.holdingsOrder || []
                     };
@@ -729,6 +738,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPriceCache(slice.priceCache);
                     setPrincipal(slice.principal);
                     setDividends(slice.dividends);
+                    setInterestIncome(slice.interestIncome);
                     setCashBalances(slice.cashBalances);
                     setHoldingsOrder(slice.holdingsOrder);
                     setFxCache(parsed.fxCache || {});
@@ -756,9 +766,9 @@ function PortfolioTracker({ onSignOut, userEmail }) {
             return;
         setAllAccountData((prev) => ({
             ...prev,
-            [activeAccountId]: { transactions, priceCache, principal, dividends, cashBalances, holdingsOrder }
+            [activeAccountId]: { transactions, priceCache, principal, dividends, interestIncome, cashBalances, holdingsOrder }
         }));
-    }, [transactions, priceCache, principal, dividends, cashBalances, holdingsOrder, loaded, activeAccountId]);
+    }, [transactions, priceCache, principal, dividends, interestIncome, cashBalances, holdingsOrder, loaded, activeAccountId]);
     // persist everything whenever the account list, active account, any
     // account's data, or the shared fx cache changes
     useEffect(() => {
@@ -782,6 +792,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         setPriceCache(slice.priceCache || {});
         setPrincipal(slice.principal || []);
         setDividends(slice.dividends || []);
+        setInterestIncome(slice.interestIncome || []);
         setCashBalances(slice.cashBalances || []);
         setHoldingsOrder(slice.holdingsOrder || []);
         setExpandedTicker(null);
@@ -817,6 +828,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
             setPriceCache(slice.priceCache || {});
             setPrincipal(slice.principal || []);
             setDividends(slice.dividends || []);
+            setInterestIncome(slice.interestIncome || []);
             setCashBalances(slice.cashBalances || []);
             setHoldingsOrder(slice.holdingsOrder || []);
             setExpandedTicker(null);
@@ -827,7 +839,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const exportInputRef = useRef(null);
     const exportAllData = () => {
         // export ALL accounts, not just the currently active one
-        const fullData = { ...allAccountData, [activeAccountId]: { transactions, priceCache, principal, dividends, cashBalances, holdingsOrder } };
+        const fullData = { ...allAccountData, [activeAccountId]: { transactions, priceCache, principal, dividends, interestIncome, cashBalances, holdingsOrder } };
         const blob = new Blob([JSON.stringify({ accounts, activeAccountId, accountData: fullData, fxCache }, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -857,6 +869,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPriceCache(slice.priceCache || {});
                     setPrincipal(slice.principal || []);
                     setDividends(slice.dividends || []);
+                    setInterestIncome(slice.interestIncome || []);
                     setCashBalances(slice.cashBalances || []);
                     setHoldingsOrder(slice.holdingsOrder || []);
                 }
@@ -866,6 +879,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPriceCache(parsed.priceCache || {});
                     setPrincipal(parsed.principal || []);
                     setDividends(parsed.dividends || []);
+                    setInterestIncome(parsed.interestIncome || []);
                     setCashBalances(parsed.cashBalances || []);
                     setHoldingsOrder(parsed.holdingsOrder || []);
                 }
@@ -1160,6 +1174,52 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         if (ok)
             setEditingDividendId(null);
     };
+    // ---- interest income (account-level, no ticker) ----
+    const addInterest = () => {
+        const postTaxUSD = parseFloat(interestForm.postTaxUSD) || 0;
+        const postTaxKRW = parseFloat(interestForm.postTaxKRW) || 0;
+        const preTaxUSD = interestForm.preTaxUSD !== "" ? (parseFloat(interestForm.preTaxUSD) || 0) : postTaxUSD;
+        const preTaxKRW = interestForm.preTaxKRW !== "" ? (parseFloat(interestForm.preTaxKRW) || 0) : postTaxKRW;
+        if (!interestForm.date || (!postTaxUSD && !postTaxKRW)) {
+            setErrorMsg("날짜와 세후 이자금액을 입력해주세요.");
+            return;
+        }
+        setErrorMsg("");
+        setInterestIncome((prev) => [...prev, { id: uid(), date: interestForm.date, preTaxUSD, preTaxKRW, postTaxUSD, postTaxKRW }]
+            .sort((a, b) => a.date.localeCompare(b.date)));
+        setInterestForm({ date: todayStr(), preTaxUSD: "", preTaxKRW: "", postTaxUSD: "", postTaxKRW: "" });
+    };
+    const deleteInterest = (id) => {
+        setInterestIncome((prev) => prev.filter((d) => d.id !== id));
+    };
+    const editInterest = (id, updated) => {
+        const postTaxUSD = parseFloat(updated.postTaxUSD) || 0;
+        const postTaxKRW = parseFloat(updated.postTaxKRW) || 0;
+        const preTaxUSD = updated.preTaxUSD !== "" ? (parseFloat(updated.preTaxUSD) || 0) : postTaxUSD;
+        const preTaxKRW = updated.preTaxKRW !== "" ? (parseFloat(updated.preTaxKRW) || 0) : postTaxKRW;
+        if (!updated.date || (!postTaxUSD && !postTaxKRW)) {
+            setErrorMsg("날짜와 세후 이자금액을 입력해주세요.");
+            return false;
+        }
+        setErrorMsg("");
+        setInterestIncome((prev) => prev
+            .map((d) => (d.id === id ? { ...d, date: updated.date, preTaxUSD, preTaxKRW, postTaxUSD, postTaxKRW } : d))
+            .sort((a, b) => a.date.localeCompare(b.date)));
+        return true;
+    };
+    const startEditInterest = (d) => {
+        setEditingInterestId(d.id);
+        setEditInterestForm({
+            date: d.date,
+            preTaxUSD: d.preTaxUSD ? String(d.preTaxUSD) : "", preTaxKRW: d.preTaxKRW ? String(d.preTaxKRW) : "",
+            postTaxUSD: d.postTaxUSD ? String(d.postTaxUSD) : "", postTaxKRW: d.postTaxKRW ? String(d.postTaxKRW) : ""
+        });
+    };
+    const saveEditInterest = () => {
+        const ok = editInterest(editingInterestId, editInterestForm);
+        if (ok)
+            setEditingInterestId(null);
+    };
     // ---- bulk import dividends from an uploaded Excel file ----
     const excelFileInputRef = useRef(null);
     const [pendingFile, setPendingFile] = useState(null);
@@ -1360,6 +1420,18 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         }
         return { preUSD, preKRW, postUSD, postKRW };
     }, [dividends, fxCache]);
+    const interestTotalsAll = useMemo(() => {
+        let preUSD = 0, preKRW = 0, postUSD = 0, postKRW = 0;
+        for (const d of interestIncome) {
+            const pre = resolveDualAmount(d.preTaxUSD, d.preTaxKRW, d.date, fxCache);
+            const post = resolveDualAmount(d.postTaxUSD, d.postTaxKRW, d.date, fxCache);
+            preUSD += pre.usd;
+            preKRW += pre.krw;
+            postUSD += post.usd;
+            postKRW += post.krw;
+        }
+        return { preUSD, preKRW, postUSD, postKRW };
+    }, [interestIncome, fxCache]);
     // ---- holdings aggregation ----
     const holdings = useMemo(() => {
         const tickers = [...new Set(transactions.map((t) => t.ticker))];
@@ -1561,10 +1633,12 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         const sortedCash = sortByDate(cashBalances);
         const sortedPrincipal = sortByDate(principal);
         const sortedDividends = sortByDate(dividends);
+        const sortedInterest = sortByDate(interestIncome);
         const candidateDates = [
             ...transactions.map((t) => t.date),
             ...principal.map((p) => p.date),
             ...dividends.map((d) => d.date),
+            ...interestIncome.map((d) => d.date),
             ...cashBalances.map((c) => c.date)
         ];
         if (candidateDates.length === 0)
@@ -1596,6 +1670,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         }
         let principalIdx = 0, cumPrincipalUSD = 0, cumPrincipalKRW = 0;
         let dividendIdx = 0, cumDividendUSD = 0, cumDividendKRW = 0;
+        let interestIdx = 0, cumInterestUSD = 0, cumInterestKRW = 0;
         let cashIdx = 0, latestCash = null;
         return sortedDates.map((date) => {
             let valUSD = 0, valKRW = 0, costUSD = 0, costKRW = 0;
@@ -1651,6 +1726,13 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                 cumDividendKRW += resolved.krw;
                 dividendIdx++;
             }
+            while (interestIdx < sortedInterest.length && sortedInterest[interestIdx].date <= date) {
+                const it = sortedInterest[interestIdx];
+                const resolved = resolveDualAmount(it.postTaxUSD, it.postTaxKRW, it.date, fxCache);
+                cumInterestUSD += resolved.usd;
+                cumInterestKRW += resolved.krw;
+                interestIdx++;
+            }
             while (cashIdx < sortedCash.length && sortedCash[cashIdx].date <= date) {
                 latestCash = sortedCash[cashIdx];
                 cashIdx++;
@@ -1662,14 +1744,15 @@ function PortfolioTracker({ onSignOut, userEmail }) {
             const cashKRW = resolvedCash.krw;
             return {
                 date, valUSD, valKRW, costUSD, costKRW, cumPrincipalUSD, cumPrincipalKRW, cumDividendUSD, cumDividendKRW,
+                cumInterestUSD, cumInterestKRW,
                 cashUSD, cashKRW,
                 totalAssetUSD: valUSD + cashUSD, totalAssetKRW: valKRW + cashKRW
             };
         });
-    }, [transactions, priceCache, principal, dividends, cashBalances, fxCache]);
+    }, [transactions, priceCache, principal, dividends, interestIncome, cashBalances, fxCache]);
     const pctOf = (profit, base) => (base > 0 ? (profit / base) * 100 : null);
-    const totalProfitUSD = (totalsToday.valUSD - totalsToday.costUSD) + totalsToday.realizedUSD + dividendTotalsAll.postUSD;
-    const totalProfitKRW = (totalsToday.valKRW - totalsToday.costKRW) + totalsToday.realizedKRW + dividendTotalsAll.postKRW;
+    const totalProfitUSD = (totalsToday.valUSD - totalsToday.costUSD) + totalsToday.realizedUSD + dividendTotalsAll.postUSD + interestTotalsAll.postUSD;
+    const totalProfitKRW = (totalsToday.valKRW - totalsToday.costKRW) + totalsToday.realizedKRW + dividendTotalsAll.postKRW + interestTotalsAll.postKRW;
     const currentReturnUSD = pctOf(totalProfitUSD, principalTotals.usd);
     const currentReturnKRW = pctOf(totalProfitKRW, principalTotals.krw);
     // ================= RENDER =================
@@ -1795,7 +1878,16 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                             "\uC138\uC804 ",
                             fmtUSD(dividendTotalsAll.preUSD),
                             " / ",
-                            fmtKRW(dividendTotalsAll.preKRW))))),
+                            fmtKRW(dividendTotalsAll.preKRW))),
+                    React.createElement("div", null,
+                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB204\uC801 \uC774\uC790\uC218\uC785 (\uC138\uD6C4)"),
+                        React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: INTEREST_COLOR } }, fmtUSD(interestTotalsAll.postUSD)),
+                        React.createElement("div", { className: "mono", style: { fontSize: 13, color: INTEREST_COLOR } }, fmtKRW(interestTotalsAll.postKRW)),
+                        React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 2 } },
+                            "\uC138\uC804 ",
+                            fmtUSD(interestTotalsAll.preUSD),
+                            " / ",
+                            fmtKRW(interestTotalsAll.preKRW))))),
             React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
                 React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 } },
                     React.createElement("div", { style: { fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
@@ -1928,7 +2020,8 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                         매입원가: chartCurrency === "KRW" ? p.costKRW : p.costUSD,
                         누적원금: chartCurrency === "KRW" ? p.cumPrincipalKRW : p.cumPrincipalUSD,
                         계좌현금: chartCurrency === "KRW" ? p.cashKRW : p.cashUSD,
-                        누적배당금: chartCurrency === "KRW" ? p.cumDividendKRW : p.cumDividendUSD
+                        누적배당금: chartCurrency === "KRW" ? p.cumDividendKRW : p.cumDividendUSD,
+                        누적이자수입: chartCurrency === "KRW" ? p.cumInterestKRW : p.cumInterestUSD
                     }));
                     const fmtFull = chartCurrency === "KRW" ? fmtKRW : fmtUSD;
                     return (React.createElement(SimpleLineChart, { data: chartData, height: 280, yTickFormat: (v) => chartCurrency === "KRW" ? "₩" + (v / 1e6).toFixed(1) + "M" : "$" + (v / 1e3).toFixed(1) + "K", tooltipFormat: fmtFull, lines: [
@@ -1936,7 +2029,8 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                             { key: "매입원가", label: "매입원가", color: MUTED, width: 1.5, dashArray: "4 3" },
                             { key: "누적원금", label: "누적원금", color: GAIN, width: 1.5, dashArray: "2 2" },
                             { key: "계좌현금", label: "계좌현금", color: CASH_COLOR, width: 1.5, dashArray: "1 3" },
-                            { key: "누적배당금", label: "누적배당금", color: DIV_COLOR, width: 1, dashArray: "1 3", opacity: 0.6 }
+                            { key: "누적배당금", label: "누적배당금", color: DIV_COLOR, width: 1, dashArray: "1 3", opacity: 0.6 },
+                            { key: "누적이자수입", label: "누적이자수입", color: INTEREST_COLOR, width: 1, dashArray: "1 3", opacity: 0.6 }
                         ] }));
                 })()))),
             React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
@@ -2123,7 +2217,64 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                                     React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditDividend(d) }),
                                     React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteDividend(d.id) }))));
                         })))))),
-            React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 18, lineHeight: 1.6 } }, "\uAC00\uACA9 \uB370\uC774\uD130\uB294 \uC9C1\uC811 \uC785\uB825\uD558\uAC70\uB098, AI \uC6F9 \uAC80\uC0C9\uC744 \uD1B5\uD574 \uC870\uD68C\uD55C \uC885\uAC00 \uAE30\uC900\uC785\uB2C8\uB2E4. \uC2E4\uC2DC\uAC04 \uC2DC\uC138\uC640\uB294 \uCC28\uC774\uAC00 \uC788\uC744 \uC218 \uC788\uC73C\uBA70, \uADF8\uB798\uD504\uC758 \uAC01 \uC9C0\uC810\uC740 \uAC70\uB798\uC77C \uBC0F \uC870\uD68C\uD55C \uB0A0\uC9DC(\uCCB4\uD06C\uD3EC\uC778\uD2B8)\uB97C \uAE30\uC900\uC73C\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uB354 \uCD18\uCD18\uD55C \uADF8\uB798\uD504\uB97C \uC6D0\uD558\uC2DC\uBA74 \uC885\uBAA9\uC744 \uD3BC\uCCD0 \uC6D0\uD558\uB294 \uB0A0\uC9DC\uB97C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uB85C \uCD94\uAC00\uD574\uBCF4\uC138\uC694. \uB9E4\uB3C4 \uC2DC \uD3C9\uADE0\uB2E8\uAC00\uBC95\uC73C\uB85C \uC2E4\uD604\uC190\uC775\uC744 \uACC4\uC0B0\uD558\uBA70, \"\uCD1D\uC190\uC775\uB960\"\uC740 \uC2E4\uD604\uC190\uC775, \uBBF8\uC2E4\uD604\uC190\uC775, \uC138\uD6C4 \uBC30\uB2F9\uAE08\uC744 \uBAA8\uB450 \uD569\uC0B0\uD574 \uADF8 \uC885\uBAA9\uC5D0 \uD22C\uC785\uD55C \uCD1D \uB9E4\uC785\uAE08\uC561 \uB300\uBE44 \uBE44\uC728\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uC6D0\uAE08 \uB300\uBE44 \uC218\uC775\uB960\uC5D0\uB3C4 \uC138\uD6C4 \uBC30\uB2F9\uAE08 \uC218\uB839\uC561\uC774 \uD3EC\uD568\uB418\uC5B4 \uACC4\uC0B0\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\uC740 \uC138\uC804/\uC138\uD6C4 \uAE08\uC561\uC744 \uD568\uAED8 \uAE30\uB85D\uD560 \uC218 \uC788\uACE0, \uC790\uC0B0 \uBCC0\uD654 \uCD94\uC801(\uADF8\uB798\uD504\u00B7\uC218\uC775\uB960 \uACC4\uC0B0)\uC5D0\uB294 \uC2E4\uC81C\uB85C \uC190\uC5D0 \uB4E4\uC5B4\uC628 \uC138\uD6C4 \uAE08\uC561\uB9CC \uC0AC\uC6A9\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\u00B7\uC6D0\uAE08\u00B7\uB9E4\uC218/\uB9E4\uB3C4\u00B7\uACC4\uC88C \uD604\uAE08 \uC785\uB825 \uC2DC \"\uD658\uC728 \uC870\uD68C\" \uBC84\uD2BC\uC744 \uB204\uB974\uBA74 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uC744 \uC870\uD68C\uD574 \uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD55C \uAE08\uC561\uC744 \uC790\uB3D9\uC73C\uB85C \uCC44\uC6CC\uC90D\uB2C8\uB2E4 (\uC591\uCABD\uC744 \uC774\uBBF8 \uC785\uB825\uD588\uB2E4\uBA74 \uADF8\uB300\uB85C \uB461\uB2C8\uB2E4). \uCD1D \uC790\uC0B0 \uADF8\uB798\uD504\uC758 \uAD75\uC740 \"\uD3C9\uAC00\uAE08\uC561\" \uC120\uC740 \uBCF4\uC720 \uC911\uC778 \uAD6D\uB0B4\u00B7\uD574\uC678 \uC8FC\uC2DD\uC744 \uAC01 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uD569\uC0B0\uD55C \uAC12\uC774\uACE0, \"\uACC4\uC88C\uD604\uAE08\"\uACFC \"\uB204\uC801\uBC30\uB2F9\uAE08\" \uC120\uB3C4 \uD55C\uCABD \uD1B5\uD654\uB9CC \uAE30\uB85D\uB41C \uACBD\uC6B0 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uCC44\uC6CC \uB123\uC2B5\uB2C8\uB2E4(\uB2E8, \uC9C0\uAE08\uAE4C\uC9C0 \uD55C \uBC88\uC774\uB77C\uB3C4 \uC870\uD68C\uB41C \uD658\uC728\uC774 \uC788\uC5B4\uC57C \uD658\uC0B0\uC774 \uAC00\uB2A5\uD574\uC694). \uACC4\uC88C \uD604\uAE08\uC740 \"\uACC4\uC88C \uD604\uAE08 \uAE30\uB85D\"\uC5D0 \uC785\uB825\uD55C \uC2A4\uB0C5\uC0F7\uC744 \uAE30\uC900\uC73C\uB85C \uB2E4\uC74C \uAE30\uB85D \uC804\uAE4C\uC9C0 \uC774\uC5B4\uC9D1\uB2C8\uB2E4(forward-fill). \uC885\uBAA9\uBCC4 \uADF8\uB798\uD504\uC758 \"\uCD1D\uC790\uC0B0(\uBC30\uB2F9\uD3EC\uD568)\" \uC120\uC740 \uADF8 \uC885\uBAA9\uC5D0\uC11C \uBC1B\uC740 \uC138\uD6C4 \uBC30\uB2F9\uAE08\uAE4C\uC9C0\uB9CC \uD3EC\uD568\uD55C, \uC885\uBAA9 \uB2E8\uC704\uC758 \uBCC4\uB3C4 \uC9C0\uD45C\uC785\uB2C8\uB2E4. \uBCF4\uC720 \uC885\uBAA9\u00B7\uC694\uC57D \uC815\uBCF4\u00B7\uBC30\uB2F9\uAE08\uC740 \uBAA8\uB450 \uB2EC\uB7EC\uC640 \uC6D0\uD654\uB97C \uD568\uAED8 \uBCF4\uC5EC\uB4DC\uB9BD\uB2C8\uB2E4."))));
+            React.createElement(Panel, { style: { padding: 18, marginTop: 20 } },
+                React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
+                    React.createElement(Coins, { size: 16, color: INTEREST_COLOR }),
+                    " \uACC4\uC88C \uC774\uC790 \uC218\uC785"),
+                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, marginBottom: 10 } },
+                    React.createElement(Field, { label: "\uC9C0\uAE09 \uB0A0\uC9DC" },
+                        React.createElement("input", { style: inputStyle, type: "date", value: interestForm.date, onChange: (e) => setInterestForm((f) => ({ ...f, date: e.target.value })) })),
+                    React.createElement(Field, { label: "\uC138\uC804 ($) \u2014 \uC120\uD0DD" },
+                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.preTaxUSD, onChange: (e) => setInterestForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
+                    React.createElement(Field, { label: "\uC138\uC804 (\u20A9) \u2014 \uC120\uD0DD" },
+                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.preTaxKRW, onChange: (e) => setInterestForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
+                    React.createElement(Field, { label: "\uC138\uD6C4 ($)" },
+                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.postTaxUSD, onChange: (e) => setInterestForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
+                    React.createElement(Field, { label: "\uC138\uD6C4 (\u20A9)" },
+                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.postTaxKRW, onChange: (e) => setInterestForm((f) => ({ ...f, postTaxKRW: e.target.value })) }))),
+                React.createElement("div", { style: { marginBottom: 4, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+                    React.createElement(Btn, { onClick: addInterest, style: { height: 34, background: INTEREST_COLOR, border: `1px solid ${INTEREST_COLOR}`, color: "#0E1A1A" } }, "\uCD94\uAC00"),
+                    React.createElement(FxFillButton, { date: interestForm.date, setForm: setInterestForm, onFx: recordFx })),
+                React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 14 } }, "\uC608\uAE08\u00B7MMF\u00B7CMA \uC774\uC790\uCC98\uB7FC \uD2B9\uC815 \uC885\uBAA9\uC5D0 \uC18D\uD558\uC9C0 \uC54A\uB294 \uACC4\uC88C \uB2E8\uC704 \uC774\uC790 \uC218\uC785\uC744 \uAE30\uB85D\uD574\uC694. \uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD588\uB2E4\uBA74 \uC870\uD68C \uBC84\uD2BC\uC73C\uB85C \uB098\uBA38\uC9C0\uB97C \uC790\uB3D9\uC73C\uB85C \uCC44\uC6B8 \uC218 \uC788\uACE0, \uC138\uC804\uC744 \uBE44\uC6CC\uB450\uBA74 \uC138\uD6C4\uC640 \uB3D9\uC77C\uD55C \uAC83\uC73C\uB85C \uCC98\uB9AC\uB3FC\uC694."),
+                interestIncome.length > 0 && (React.createElement("div", { style: { overflowX: "auto" } },
+                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                        React.createElement("thead", null,
+                            React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
+                                React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 $"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \u20A9"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 $"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 \u20A9"),
+                                React.createElement("th", { style: { padding: 6, width: 50 } }))),
+                        React.createElement("tbody", null, [...interestIncome].sort((a, b) => a.date.localeCompare(b.date)).map((d) => {
+                            if (editingInterestId === d.id) {
+                                return (React.createElement("tr", { key: d.id, className: "ledger-row" },
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 125, marginBottom: 4 }, type: "date", value: editInterestForm.date, onChange: (e) => setEditInterestForm((f) => ({ ...f, date: e.target.value })) }),
+                                        React.createElement(FxFillButton, { date: editInterestForm.date, setForm: setEditInterestForm, label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.preTaxUSD, onChange: (e) => setEditInterestForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.preTaxKRW, onChange: (e) => setEditInterestForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.postTaxUSD, onChange: (e) => setEditInterestForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.postTaxKRW, onChange: (e) => setEditInterestForm((f) => ({ ...f, postTaxKRW: e.target.value })) })),
+                                    React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                        React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditInterest }),
+                                        React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingInterestId(null) }))));
+                            }
+                            return (React.createElement("tr", { key: d.id, className: "ledger-row" },
+                                React.createElement("td", { className: "mono", style: { padding: 6 } }, d.date),
+                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxUSD ? fmtUSD(d.preTaxUSD) : "—"),
+                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxKRW ? fmtKRW(d.preTaxKRW) : "—"),
+                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: INTEREST_COLOR } }, d.postTaxUSD ? fmtUSD(d.postTaxUSD) : "—"),
+                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: INTEREST_COLOR } }, d.postTaxKRW ? fmtKRW(d.postTaxKRW) : "—"),
+                                React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                    React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditInterest(d) }),
+                                    React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteInterest(d.id) }))));
+                        })))))),
+            React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 18, lineHeight: 1.6 } }, "\uAC00\uACA9 \uB370\uC774\uD130\uB294 \uC9C1\uC811 \uC785\uB825\uD558\uAC70\uB098, AI \uC6F9 \uAC80\uC0C9\uC744 \uD1B5\uD574 \uC870\uD68C\uD55C \uC885\uAC00 \uAE30\uC900\uC785\uB2C8\uB2E4. \uC2E4\uC2DC\uAC04 \uC2DC\uC138\uC640\uB294 \uCC28\uC774\uAC00 \uC788\uC744 \uC218 \uC788\uC73C\uBA70, \uADF8\uB798\uD504\uC758 \uAC01 \uC9C0\uC810\uC740 \uAC70\uB798\uC77C \uBC0F \uC870\uD68C\uD55C \uB0A0\uC9DC(\uCCB4\uD06C\uD3EC\uC778\uD2B8)\uB97C \uAE30\uC900\uC73C\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uB354 \uCD18\uCD18\uD55C \uADF8\uB798\uD504\uB97C \uC6D0\uD558\uC2DC\uBA74 \uC885\uBAA9\uC744 \uD3BC\uCCD0 \uC6D0\uD558\uB294 \uB0A0\uC9DC\uB97C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uB85C \uCD94\uAC00\uD574\uBCF4\uC138\uC694. \uB9E4\uB3C4 \uC2DC \uD3C9\uADE0\uB2E8\uAC00\uBC95\uC73C\uB85C \uC2E4\uD604\uC190\uC775\uC744 \uACC4\uC0B0\uD558\uBA70, \"\uCD1D\uC190\uC775\uB960\"\uC740 \uC2E4\uD604\uC190\uC775, \uBBF8\uC2E4\uD604\uC190\uC775, \uC138\uD6C4 \uBC30\uB2F9\uAE08\uC744 \uBAA8\uB450 \uD569\uC0B0\uD574 \uADF8 \uC885\uBAA9\uC5D0 \uD22C\uC785\uD55C \uCD1D \uB9E4\uC785\uAE08\uC561 \uB300\uBE44 \uBE44\uC728\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uC6D0\uAE08 \uB300\uBE44 \uC218\uC775\uB960\uC5D0\uB3C4 \uC138\uD6C4 \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785 \uC218\uB839\uC561\uC774 \uD3EC\uD568\uB418\uC5B4 \uACC4\uC0B0\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785\uC740 \uC138\uC804/\uC138\uD6C4 \uAE08\uC561\uC744 \uD568\uAED8 \uAE30\uB85D\uD560 \uC218 \uC788\uACE0, \uC790\uC0B0 \uBCC0\uD654 \uCD94\uC801(\uADF8\uB798\uD504\u00B7\uC218\uC775\uB960 \uACC4\uC0B0)\uC5D0\uB294 \uC2E4\uC81C\uB85C \uC190\uC5D0 \uB4E4\uC5B4\uC628 \uC138\uD6C4 \uAE08\uC561\uB9CC \uC0AC\uC6A9\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785\u00B7\uC6D0\uAE08\u00B7\uB9E4\uC218/\uB9E4\uB3C4\u00B7\uACC4\uC88C \uD604\uAE08 \uC785\uB825 \uC2DC \"\uD658\uC728 \uC870\uD68C\" \uBC84\uD2BC\uC744 \uB204\uB974\uBA74 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uC744 \uC870\uD68C\uD574 \uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD55C \uAE08\uC561\uC744 \uC790\uB3D9\uC73C\uB85C \uCC44\uC6CC\uC90D\uB2C8\uB2E4 (\uC591\uCABD\uC744 \uC774\uBBF8 \uC785\uB825\uD588\uB2E4\uBA74 \uADF8\uB300\uB85C \uB461\uB2C8\uB2E4). \uCD1D \uC790\uC0B0 \uADF8\uB798\uD504\uC758 \uAD75\uC740 \"\uD3C9\uAC00\uAE08\uC561\" \uC120\uC740 \uBCF4\uC720 \uC911\uC778 \uAD6D\uB0B4\u00B7\uD574\uC678 \uC8FC\uC2DD\uC744 \uAC01 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uD569\uC0B0\uD55C \uAC12\uC774\uACE0, \"\uACC4\uC88C\uD604\uAE08\"\u00B7\"\uB204\uC801\uBC30\uB2F9\uAE08\"\u00B7\"\uB204\uC801\uC774\uC790\uC218\uC785\" \uC120\uB3C4 \uD55C\uCABD \uD1B5\uD654\uB9CC \uAE30\uB85D\uB41C \uACBD\uC6B0 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uCC44\uC6CC \uB123\uC2B5\uB2C8\uB2E4(\uB2E8, \uC9C0\uAE08\uAE4C\uC9C0 \uD55C \uBC88\uC774\uB77C\uB3C4 \uC870\uD68C\uB41C \uD658\uC728\uC774 \uC788\uC5B4\uC57C \uD658\uC0B0\uC774 \uAC00\uB2A5\uD574\uC694). \uACC4\uC88C \uD604\uAE08\uC740 \"\uACC4\uC88C \uD604\uAE08 \uAE30\uB85D\"\uC5D0 \uC785\uB825\uD55C \uC2A4\uB0C5\uC0F7\uC744 \uAE30\uC900\uC73C\uB85C \uB2E4\uC74C \uAE30\uB85D \uC804\uAE4C\uC9C0 \uC774\uC5B4\uC9D1\uB2C8\uB2E4(forward-fill). \uC885\uBAA9\uBCC4 \uADF8\uB798\uD504\uC758 \"\uCD1D\uC790\uC0B0(\uBC30\uB2F9\uD3EC\uD568)\" \uC120\uC740 \uADF8 \uC885\uBAA9\uC5D0\uC11C \uBC1B\uC740 \uC138\uD6C4 \uBC30\uB2F9\uAE08\uAE4C\uC9C0\uB9CC \uD3EC\uD568\uD55C, \uC885\uBAA9 \uB2E8\uC704\uC758 \uBCC4\uB3C4 \uC9C0\uD45C\uC785\uB2C8\uB2E4. \uBCF4\uC720 \uC885\uBAA9\u00B7\uC694\uC57D \uC815\uBCF4\u00B7\uBC30\uB2F9\uAE08\uC740 \uBAA8\uB450 \uB2EC\uB7EC\uC640 \uC6D0\uD654\uB97C \uD568\uAED8 \uBCF4\uC5EC\uB4DC\uB9BD\uB2C8\uB2E4."))));
 }
 // ---------- ticker detail panel ----------
 function TickerDetail({ ticker, transactions, dividends, onDeleteDividend, onEditDividend, series, missingDates, busyKeys, onFetch, onDeleteTx, onEditTx, chartCurrency, setChartCurrency, checkpointDate, setCheckpointDate, onAddCheckpoint, manualEntry, setManualEntry, onSaveManual, recordFx }) {
