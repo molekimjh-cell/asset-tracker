@@ -633,6 +633,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const [principal, setPrincipal] = useState([]); // {id, date, amountUSD, amountKRW}
     const [dividends, setDividends] = useState([]); // {id, ticker, date, preTaxUSD, preTaxKRW, postTaxUSD, postTaxKRW}
     const [cashBalances, setCashBalances] = useState([]); // {id, date, amountUSD, amountKRW} - account cash snapshot on that date
+    const [holdingsOrder, setHoldingsOrder] = useState([]); // [ticker, ...] — user's manual display order for the holdings table
     const [fxCache, setFxCache] = useState({}); // { date: usdKrwRate } - accumulated from every price/fx lookup ever made
     const recordFx = useCallback((date, fx) => {
         if (!date || !fx)
@@ -662,7 +663,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const [editingCashId, setEditingCashId] = useState(null);
     const [editCashForm, setEditCashForm] = useState({ date: "", amountUSD: "", amountKRW: "" });
     // ---- load / save (multi-account) ----
-    const emptySlice = () => ({ transactions: [], priceCache: {}, principal: [], dividends: [], cashBalances: [] });
+    const emptySlice = () => ({ transactions: [], priceCache: {}, principal: [], dividends: [], cashBalances: [], holdingsOrder: [] });
     const [loadError, setLoadError] = useState(null);
     useEffect(() => {
         (async () => {
@@ -707,6 +708,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPrincipal(slice.principal || []);
                     setDividends(slice.dividends || []);
                     setCashBalances(slice.cashBalances || []);
+                    setHoldingsOrder(slice.holdingsOrder || []);
                     setFxCache(parsed.fxCache || {});
                 }
                 else if (parsed && (parsed.transactions || parsed.priceCache || parsed.principal || parsed.dividends || parsed.cashBalances)) {
@@ -717,7 +719,8 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                         priceCache: parsed.priceCache || {},
                         principal: parsed.principal || [],
                         dividends: parsed.dividends || [],
-                        cashBalances: parsed.cashBalances || []
+                        cashBalances: parsed.cashBalances || [],
+                        holdingsOrder: parsed.holdingsOrder || []
                     };
                     setAccounts([{ id: defaultId, name: "계좌 1" }]);
                     setActiveAccountId(defaultId);
@@ -727,6 +730,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPrincipal(slice.principal);
                     setDividends(slice.dividends);
                     setCashBalances(slice.cashBalances);
+                    setHoldingsOrder(slice.holdingsOrder);
                     setFxCache(parsed.fxCache || {});
                 }
                 else {
@@ -752,9 +756,9 @@ function PortfolioTracker({ onSignOut, userEmail }) {
             return;
         setAllAccountData((prev) => ({
             ...prev,
-            [activeAccountId]: { transactions, priceCache, principal, dividends, cashBalances }
+            [activeAccountId]: { transactions, priceCache, principal, dividends, cashBalances, holdingsOrder }
         }));
-    }, [transactions, priceCache, principal, dividends, cashBalances, loaded, activeAccountId]);
+    }, [transactions, priceCache, principal, dividends, cashBalances, holdingsOrder, loaded, activeAccountId]);
     // persist everything whenever the account list, active account, any
     // account's data, or the shared fx cache changes
     useEffect(() => {
@@ -779,6 +783,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         setPrincipal(slice.principal || []);
         setDividends(slice.dividends || []);
         setCashBalances(slice.cashBalances || []);
+        setHoldingsOrder(slice.holdingsOrder || []);
         setExpandedTicker(null);
         setConfirmClearTx(false);
         setErrorMsg("");
@@ -813,6 +818,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
             setPrincipal(slice.principal || []);
             setDividends(slice.dividends || []);
             setCashBalances(slice.cashBalances || []);
+            setHoldingsOrder(slice.holdingsOrder || []);
             setExpandedTicker(null);
         }
     };
@@ -821,7 +827,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const exportInputRef = useRef(null);
     const exportAllData = () => {
         // export ALL accounts, not just the currently active one
-        const fullData = { ...allAccountData, [activeAccountId]: { transactions, priceCache, principal, dividends, cashBalances } };
+        const fullData = { ...allAccountData, [activeAccountId]: { transactions, priceCache, principal, dividends, cashBalances, holdingsOrder } };
         const blob = new Blob([JSON.stringify({ accounts, activeAccountId, accountData: fullData, fxCache }, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -852,6 +858,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPrincipal(slice.principal || []);
                     setDividends(slice.dividends || []);
                     setCashBalances(slice.cashBalances || []);
+                    setHoldingsOrder(slice.holdingsOrder || []);
                 }
                 else {
                     // old single-account backup — load it into the current account
@@ -860,6 +867,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setPrincipal(parsed.principal || []);
                     setDividends(parsed.dividends || []);
                     setCashBalances(parsed.cashBalances || []);
+                    setHoldingsOrder(parsed.holdingsOrder || []);
                 }
                 setFxCache(parsed.fxCache || {});
                 setImportDataMsg(`✓ "${file.name}"의 데이터를 불러왔습니다.`);
@@ -1355,7 +1363,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     // ---- holdings aggregation ----
     const holdings = useMemo(() => {
         const tickers = [...new Set(transactions.map((t) => t.ticker))];
-        return tickers
+        const list = tickers
             .map((ticker) => {
             const state = computeHoldingState(sortByDate(transactions.filter((t) => t.ticker === ticker)));
             const todayKey = cacheKey(ticker, todayStr());
@@ -1389,9 +1397,31 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                 gainPctUSD: combinedGainUSD !== null && state.totalBuyCostUSD > 0 ? (combinedGainUSD / state.totalBuyCostUSD) * 100 : null,
                 gainPctKRW: combinedGainKRW !== null && state.totalBuyCostKRW > 0 ? (combinedGainKRW / state.totalBuyCostKRW) * 100 : null
             };
-        })
-            .sort((a, b) => (b.curValueUSD || b.costUSD || 0) - (a.curValueUSD || a.costUSD || 0));
-    }, [transactions, priceCache, dividendTotalsByTicker, fxCache]);
+        });
+        const byValue = [...list].sort((a, b) => (b.curValueUSD || b.costUSD || 0) - (a.curValueUSD || a.costUSD || 0));
+        // apply the user's manual order on top of the default value sort —
+        // anything not yet in holdingsOrder (new tickers) falls in after, ranked
+        // among themselves by the default value sort
+        const order = holdingsOrder || [];
+        const known = new Set(byValue.map((h) => h.ticker));
+        const inOrder = order.filter((t) => known.has(t)).map((t) => byValue.find((h) => h.ticker === t));
+        const notInOrder = byValue.filter((h) => !order.includes(h.ticker));
+        return [...inOrder, ...notInOrder];
+    }, [transactions, priceCache, dividendTotalsByTicker, fxCache, holdingsOrder]);
+    // Moves a ticker's row up or down one position in the holdings table,
+    // persisting the full current order so the swap is stable.
+    const moveHolding = (ticker, direction) => {
+        const currentFull = holdings.map((h) => h.ticker);
+        const idx = currentFull.indexOf(ticker);
+        if (idx === -1)
+            return;
+        const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+        if (swapIdx < 0 || swapIdx >= currentFull.length)
+            return;
+        const next = [...currentFull];
+        [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
+        setHoldingsOrder(next);
+    };
     const totalsToday = useMemo(() => {
         let costUSD = 0, costKRW = 0, valUSD = 0, valKRW = 0, realizedUSD = 0, realizedKRW = 0, missing = false;
         for (const h of holdings) {
@@ -1837,23 +1867,28 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                                 React.createElement("th", { style: { textAlign: "left", padding: "8px 18px" } }, "\uC885\uBAA9"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uBCF4\uC720\uC218\uB7C9"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD3C9\uADE0\uB2E8\uAC00"),
+                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD22C\uC790\uC6D0\uAE08"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD604\uC7AC\uAC00"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD3C9\uAC00\uAE08\uC561"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uC2E4\uD604\uC190\uC775"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uBC30\uB2F9\uAE08(\uC138\uD6C4)"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uCD1D\uC190\uC775\uC561"),
                                 React.createElement("th", { style: { textAlign: "right", padding: "8px 18px" } }, "\uCD1D\uC190\uC775\uB960"))),
-                        React.createElement("tbody", null, holdings.map((h) => {
+                        React.createElement("tbody", null, holdings.map((h, idx) => {
                             const key = cacheKey(h.ticker, todayStr());
                             const isBusy = busyKeys[key];
                             return (React.createElement(React.Fragment, { key: h.ticker },
                                 React.createElement("tr", { className: "ledger-row", onClick: () => setExpandedTicker(expandedTicker === h.ticker ? null : h.ticker) },
                                     React.createElement("td", { style: { padding: "10px 18px", display: "flex", alignItems: "center", gap: 8 } },
+                                        React.createElement("span", { style: { display: "flex", flexDirection: "column", gap: 1 } },
+                                            React.createElement("span", { onClick: (e) => { e.stopPropagation(); moveHolding(h.ticker, "up"); }, style: { fontSize: 9, lineHeight: 1, color: idx === 0 ? LINE : MUTED, cursor: idx === 0 ? "default" : "pointer" } }, "\u25B2"),
+                                            React.createElement("span", { onClick: (e) => { e.stopPropagation(); moveHolding(h.ticker, "down"); }, style: { fontSize: 9, lineHeight: 1, color: idx === holdings.length - 1 ? LINE : MUTED, cursor: idx === holdings.length - 1 ? "default" : "pointer" } }, "\u25BC")),
                                         expandedTicker === h.ticker ? React.createElement(ChevronDown, { size: 14, color: MUTED }) : React.createElement(ChevronRight, { size: 14, color: MUTED }),
                                         React.createElement("span", { style: { fontWeight: 700 }, className: "mono" }, h.ticker),
                                         h.closed && (React.createElement("span", { style: { fontSize: 10, color: MUTED, border: `1px solid ${LINE}`, borderRadius: 4, padding: "1px 6px" } }, "\uCCAD\uC0B0"))),
                                     React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 8 } }, h.closed ? "0" : fmtNum(h.qty, 4)),
                                     React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.avgUSD, krw: h.avgKRW })),
+                                    React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.costUSD, krw: h.costKRW })),
                                     React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : h.curPriceUSD !== null
                                         ? React.createElement(DualLine, { usd: h.curPriceUSD, krw: h.curPriceKRW })
                                         : (React.createElement("div", { style: { textAlign: "right" } },
@@ -1875,7 +1910,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                                             React.createElement("div", { className: "mono", style: { fontWeight: 700, color: h.gainPctUSD === null ? MUTED : h.gainPctUSD >= 0 ? GAIN : LOSS } }, fmtPct(h.gainPctUSD)),
                                             React.createElement("div", { className: "mono", style: { fontSize: 11, color: h.gainPctKRW === null ? MUTED : h.gainPctKRW >= 0 ? GAIN : LOSS } }, fmtPct(h.gainPctKRW))))),
                                 expandedTicker === h.ticker && (React.createElement("tr", null,
-                                    React.createElement("td", { colSpan: 9, style: { padding: 0, background: PANEL_SOFT } },
+                                    React.createElement("td", { colSpan: 10, style: { padding: 0, background: PANEL_SOFT } },
                                         React.createElement(TickerDetail, { ticker: h.ticker, transactions: transactions.filter((t) => t.ticker === h.ticker), dividends: dividends.filter((d) => d.ticker === h.ticker), onDeleteDividend: deleteDividend, onEditDividend: editDividend, series: tickerSeries(h.ticker), missingDates: missingDatesForTicker(h.ticker), busyKeys: busyKeys, onFetch: (d) => fetchPrice(h.ticker, d), onDeleteTx: deleteTransaction, onEditTx: editTransaction, chartCurrency: chartCurrency, setChartCurrency: setChartCurrency, checkpointDate: checkpointDate, setCheckpointDate: setCheckpointDate, onAddCheckpoint: addCheckpoint, manualEntry: manualEntry, setManualEntry: setManualEntry, onSaveManual: (d) => saveManualPrice(h.ticker, d), recordFx: recordFx }))))));
                         })))))),
             React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
