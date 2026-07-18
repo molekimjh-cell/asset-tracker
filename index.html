@@ -88,8 +88,8 @@ window.__PORTFOLIO_APP_STARTED__ = true;
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 // Minimal text/emoji-based icon shims (no lucide-react in this build); every
 // existing <Plus .../>-style usage below keeps working unchanged.
-function Icon({ size = 14, color, className = "", children, style }) {
-    return (React.createElement("span", { className: className, style: { fontSize: size, color, lineHeight: 1, display: "inline-block", ...style } }, children));
+function Icon({ size = 14, color, className = "", children, style, ...rest }) {
+    return (React.createElement("span", { className: className, style: { fontSize: size, color, lineHeight: 1, display: "inline-block", ...style }, ...rest }, children));
 }
 const Plus = (p) => React.createElement(Icon, { ...p }, "+");
 const Trash2 = (p) => React.createElement(Icon, { ...p }, "\uD83D\uDDD1");
@@ -262,7 +262,41 @@ async function fetchYahooClose(yTicker, dateStr) {
     const resolvedDate = new Date(timestamps[bestIdx] * 1000).toISOString().slice(0, 10);
     return { date: resolvedDate, close: closes[bestIdx] };
 }
+// Naver Finance's public polling endpoint often works better for Korean
+// tickers than routing Yahoo through a proxy. Response shape isn't officially
+// documented, so this is defensive: any mismatch just falls through silently
+// to the Yahoo-based fetchKoreanClose below (no regression risk).
+async function fetchNaverClose(code) {
+    var _a, _b, _c;
+    const url = `https://polling.finance.naver.com/api/realtime/domestic/stock/${code}`;
+    let res;
+    try {
+        res = await fetch(url);
+        if (!res.ok)
+            throw new Error("HTTP " + res.status);
+    }
+    catch (e) {
+        res = await fetchViaProxies(url);
+    }
+    const data = await res.json();
+    const item = data && data.datas && data.datas[0];
+    if (!item)
+        throw new Error("no data from Naver");
+    const raw = (_c = (_b = (_a = item.closePrice) !== null && _a !== void 0 ? _a : item.close) !== null && _b !== void 0 ? _b : item.tradePrice) !== null && _c !== void 0 ? _c : item.currentPrice;
+    const price = typeof raw === "number" ? raw : parseFloat(String(raw).replace(/,/g, ""));
+    if (!price || isNaN(price))
+        throw new Error("no usable price from Naver");
+    return { date: todayStr(), close: price };
+}
 async function fetchKoreanClose(code, dateStr) {
+    if (dateStr === todayStr()) {
+        try {
+            return await fetchNaverClose(code);
+        }
+        catch (e) {
+            // fall through to Yahoo below
+        }
+    }
     try {
         return await fetchYahooClose(code + ".KS", dateStr);
     }
