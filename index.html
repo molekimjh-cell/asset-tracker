@@ -67,6 +67,18 @@
   }
 </script>
 
+<!-- ================================================================
+     (선택) FINNHUB API 키 — Yahoo Finance는 프로식서 경유가 필수인데
+     프록식서 차단이 자주 생기면, finnhub.io에서 무료 가입(카드 불필요) 후
+     API 키를 발급받아 아래에 넣으면, 키가 있는 해외(미국) 종목은 프록식서
+     없이 직접 조회되어 훨씬 안정적이에요 (다만 오늘 가격만; 과거 날짜와
+     국내 종목은 여전히 Yahoo Finance 경로를 씨요). 비워두면 자동으로 건너뛰고
+     Yahoo Finance만 쓰니 선택사항입니다.
+     ================================================================ -->
+<script>
+  window.FINNHUB_API_KEY = "d9dfuj1r01qj7sqcj440d9dfuj1r01qj7sqcj44g";
+</script>
+
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
@@ -263,6 +275,23 @@ async function fetchKoreanClose(code, dateStr) {
         }
     }
 }
+// Finnhub genuinely supports CORS for direct browser calls (no proxy needed),
+// unlike Yahoo — used as the first attempt for TODAY's price on non-Korean
+// tickers when a free API key is configured (window.FINNHUB_API_KEY, set in
+// index.html). Falls back to Yahoo+proxies if no key, rate-limited, or the
+// ticker isn't covered (Finnhub's free tier is US-market only).
+async function fetchFinnhubQuote(ticker) {
+    const key = window.FINNHUB_API_KEY;
+    if (!key)
+        throw new Error("no Finnhub key configured");
+    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${key}`);
+    if (!res.ok)
+        throw new Error("Finnhub HTTP " + res.status);
+    const data = await res.json();
+    if (!data || !data.c)
+        throw new Error("Finnhub: no price for " + ticker);
+    return Number(data.c);
+}
 async function freeFxRate(dateStr) {
     const isToday = dateStr === todayStr();
     if (isToday) {
@@ -302,6 +331,17 @@ async function freeFxRate(dateStr) {
 }
 async function freePriceLookup(ticker, dateStr) {
     const korean = isKoreanTicker(ticker);
+    const isToday = dateStr === todayStr();
+    if (!korean && isToday) {
+        try {
+            const price = await fetchFinnhubQuote(ticker);
+            const fxResult = await freeFxRate(dateStr);
+            return { date: dateStr, priceUSD: price, priceKRW: fxResult.fx ? price * fxResult.fx : 0, fx: fxResult.fx };
+        }
+        catch (e) {
+            // no key configured, rate-limited, or ticker not covered — fall through to Yahoo
+        }
+    }
     const priceResult = korean ? await fetchKoreanClose(ticker, dateStr) : await fetchYahooClose(ticker, dateStr);
     const fxResult = await freeFxRate(priceResult.date);
     if (korean) {
@@ -589,10 +629,34 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const [editCashForm, setEditCashForm] = useState({ date: "", amountUSD: "", amountKRW: "" });
     // ---- load / save (multi-account) ----
     const emptySlice = () => ({ transactions: [], priceCache: {}, principal: [], dividends: [], cashBalances: [] });
+    const [loadError, setLoadError] = useState(null);
     useEffect(() => {
         (async () => {
+            // Retry a few times first — right after sign-in there can be a brief
+            // race where Firestore requests fail before the auth token is fully
+            // attached. We must NOT treat a failed read as "this is a new user with
+            // no data" (that would create an empty account and, once saved, wipe
+            // out real existing data) — only a *successful* read that's genuinely
+            // empty should do that.
+            let res, lastErr;
+            for (let attempt = 0; attempt < 4; attempt++) {
+                try {
+                    res = await window.storage.get(STORAGE_KEY, false);
+                    lastErr = null;
+                    break;
+                }
+                catch (e) {
+                    lastErr = e;
+                    await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+                }
+            }
+            if (lastErr) {
+                // Every retry failed — show a blocking error instead of silently
+                // starting fresh (which would risk overwriting real cloud data).
+                setLoadError(lastErr.message || String(lastErr));
+                return;
+            }
             try {
-                const res = await window.storage.get(STORAGE_KEY, false);
                 const parsed = res && res.value ? JSON.parse(res.value) : null;
                 if (parsed && parsed.accounts && parsed.accounts.length > 0) {
                     // already in multi-account format
@@ -632,21 +696,18 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setFxCache(parsed.fxCache || {});
                 }
                 else {
-                    // brand new — start with one empty default account
+                    // genuinely brand new (read succeeded, nothing stored yet)
                     const defaultId = uid();
                     setAccounts([{ id: defaultId, name: "계좌 1" }]);
                     setActiveAccountId(defaultId);
                     setAllAccountData({ [defaultId]: emptySlice() });
                 }
+                setLoaded(true);
             }
             catch (e) {
-                const defaultId = uid();
-                setAccounts([{ id: defaultId, name: "계좌 1" }]);
-                setActiveAccountId(defaultId);
-                setAllAccountData({ [defaultId]: emptySlice() });
-            }
-            finally {
-                setLoaded(true);
+                // parsing/logic error on data that WAS successfully read — this is a
+                // real data problem, not "no data", so also block rather than wipe.
+                setLoadError("불러온 데이터를 해석하는 중 오류: " + e.message);
             }
         })();
     }, []);
@@ -1548,6 +1609,23 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const currentReturnUSD = pctOf(totalProfitUSD, principalTotals.usd);
     const currentReturnKRW = pctOf(totalProfitKRW, principalTotals.krw);
     // ================= RENDER =================
+    if (loadError) {
+        return (React.createElement("div", { style: {
+                minHeight: "100vh", background: BG, color: TEXT, display: "flex", alignItems: "center", justifyContent: "center",
+                fontFamily: "-apple-system, sans-serif", padding: 24
+            } },
+            React.createElement("div", { style: { maxWidth: 480, background: PANEL, border: `1px solid ${LOSS}55`, borderRadius: 8, padding: 24, lineHeight: 1.6 } },
+                React.createElement("div", { style: { color: LOSS, fontWeight: 700, marginBottom: 8 } }, "\u26A0\uFE0F \uB370\uC774\uD130\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC5B4\uC694"),
+                React.createElement("div", { style: { fontSize: 13, color: MUTED, marginBottom: 14 } }, "\uC548\uC804\uC744 \uC704\uD574 \uB370\uC774\uD130\uB97C \uBD88\uB7EC\uC624\uB294 \uB370 \uC2E4\uD328\uD588\uC744 \uB550 \uD654\uBA74\uC744 \uC0C8\uB85C \uC2DC\uC791\uD558\uC9C0 \uC54A\uACE0 \uC5EC\uAE30\uC11C \uBA48\uCDB0\uC694 (\uADF8\uB807\uC9C0 \uC54A\uC73C\uBA74 \uC800\uC7A5\uB41C \uB370\uC774\uD130\uB97C \uBE48 \uC0C1\uD0DC\uB85C \uB36E\uC5B4\uC4F8 \uC704\uD5D8\uC774 \uC788\uC5B4\uC11C\uC608\uC694). \uC778\uD130\uB137 \uC5F0\uACB0\uC744 \uD655\uC778\uD558\uACE0 \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694."),
+                React.createElement("div", { className: "mono", style: { fontSize: 12, color: LOSS, marginBottom: 14, whiteSpace: "pre-wrap" } }, loadError),
+                React.createElement(Btn, { onClick: () => window.location.reload() }, "\uB2E4\uC2DC \uC2DC\uB3C4"))));
+    }
+    if (!loaded) {
+        return (React.createElement("div", { style: {
+                minHeight: "100vh", background: BG, color: MUTED, display: "flex", alignItems: "center", justifyContent: "center",
+                fontFamily: "-apple-system, sans-serif"
+            } }, "\uB370\uC774\uD130 \uBD88\uB7EC\uC624\uB294 \uC911..."));
+    }
     return (React.createElement("div", { style: {
             background: BG, color: TEXT, minHeight: "100%", padding: "20px 16px 60px",
             fontFamily: "-apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Segoe UI', Roboto, sans-serif"
