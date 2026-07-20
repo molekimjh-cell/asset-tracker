@@ -120,6 +120,16 @@ const LOSS = "#FF6B6B";
 const DIV_COLOR = "#5FB0E8"; // dividend accent (cool blue, distinct from gain/loss)
 const CASH_COLOR = "#B48EED"; // account cash accent (violet, distinct from dividend blue)
 const INTEREST_COLOR = "#3FB8A8"; // interest income accent (teal, distinct from all the above)
+const OTHER_INCOME_COLOR = "#D98E5F"; // other income accent (warm orange, distinct from all the above)
+// ---------- salary / other income (global, not tied to any brokerage account) ----------
+const SALARY_CATEGORIES = [
+    "본봉", "식사대", "연구보조비", "추가과목 강사료", "영어강의료", "정근수당",
+    "명절휴가비", "연봉인상소급지급", "입학/편입학 심사비", "논문인센티브",
+    "연구능률성과급(간접비배분)", "연구수당", "연말정산"
+];
+const DEDUCTION_CATEGORY = "공제액";
+const SALARY_CATEGORIES_ALL = [...SALARY_CATEGORIES, DEDUCTION_CATEGORY];
+const OTHER_INCOME_CATEGORIES = ["과제 심사비", "강연료", "자문료"];
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const fmtUSD = (n) => {
@@ -176,6 +186,18 @@ function computeHoldingState(sortedTxs) {
 }
 function sortByDate(txs) {
     return [...txs].sort((a, b) => a.date.localeCompare(b.date));
+}
+// Fiscal year used ONLY in the 연봉·기타소득 tab: March through the
+// following February, rather than the calendar Jan–Dec year.
+// dateStr is "YYYY-MM" or "YYYY-MM-DD". Returns the fiscal year's start year
+// as a number (e.g. March 2026 – Feb 2027 both return 2026).
+function fiscalYearOf(dateStr) {
+    const year = Number(dateStr.slice(0, 4));
+    const month = Number(dateStr.slice(5, 7));
+    return month >= 3 ? year : year - 1;
+}
+function fiscalYearLabel(startYear) {
+    return `${startYear}.3–${startYear + 1}.2`;
 }
 // Every calendar date from start to end (inclusive), as "YYYY-MM-DD" strings.
 // Used so chart X-axes show a continuous timeline instead of only the dates
@@ -600,6 +622,102 @@ function SimpleLineChart({ data, lines, height = 260, yTickFormat, tooltipFormat
             React.createElement("span", { style: { width: 10, height: 2, background: l.color, display: "inline-block" } }),
             l.label))))));
 }
+// Minimal stacked bar chart (year -> {연봉, 기타소득}) — used for the yearly
+// income chart since this build has no charting library dependency.
+function SimpleBarChart({ data, bars, height = 260, yTickFormat, tooltipFormat }) {
+    const containerRef = useRef(null);
+    const [hoverIdx, setHoverIdx] = useState(null);
+    const [containerWidth, setContainerWidth] = useState(700);
+    useEffect(() => {
+        if (!containerRef.current || typeof ResizeObserver === "undefined")
+            return;
+        const el = containerRef.current;
+        const ro = new ResizeObserver((entries) => {
+            for (const entry of entries)
+                setContainerWidth(Math.max(entry.contentRect.width, 100));
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+    const padding = { top: 14, right: 12, bottom: 24, left: 60 };
+    const width = Math.max(containerWidth, 100);
+    const plotW = Math.max(width - padding.left - padding.right, 10);
+    const plotH = Math.max(height - padding.top - padding.bottom, 10);
+    const n = data.length;
+    let maxV = 0, minV = 0;
+    for (const row of data) {
+        let stackTotal = 0;
+        for (const b of bars)
+            stackTotal += row[b.key] || 0;
+        if (stackTotal > maxV)
+            maxV = stackTotal;
+        if (stackTotal < minV)
+            minV = stackTotal;
+    }
+    if (maxV === minV)
+        maxV = minV + 1;
+    const span = maxV - minV;
+    const yAt = (v) => padding.top + (1 - (v - minV) / span) * plotH;
+    const zeroY = yAt(0);
+    const slotW = n > 0 ? plotW / n : plotW;
+    const barW = Math.min(slotW * 0.5, 60);
+    const yTickCount = 4;
+    const tickVals = Array.from({ length: yTickCount + 1 }, (_, i) => minV + (span * i) / yTickCount);
+    const handleMove = (e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        if (rect.width === 0 || n === 0)
+            return;
+        const relX = ((e.clientX - rect.left) / rect.width) * width;
+        const idx = Math.min(Math.max(Math.floor((relX - padding.left) / slotW), 0), n - 1);
+        setHoverIdx(idx);
+    };
+    const hoverRow = hoverIdx !== null ? data[hoverIdx] : null;
+    const hoverX = hoverIdx !== null ? padding.left + slotW * (hoverIdx + 0.5) : 0;
+    const tooltipLeftPct = hoverIdx !== null ? Math.min(Math.max((hoverX / width) * 100, 10), 78) : 0;
+    return (React.createElement("div", { ref: containerRef, style: { width: "100%", position: "relative" } },
+        React.createElement("svg", { width: "100%", height: height, viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: "none", onMouseMove: handleMove, onMouseLeave: () => setHoverIdx(null), style: { display: "block", cursor: "crosshair" } },
+            tickVals.map((tv, i) => (React.createElement("g", { key: i },
+                React.createElement("line", { x1: padding.left, x2: width - padding.right, y1: yAt(tv), y2: yAt(tv), stroke: LINE, strokeDasharray: "3 3" }),
+                React.createElement("text", { x: padding.left - 8, y: yAt(tv) + 4, fontSize: "10", fill: MUTED, textAnchor: "end" }, yTickFormat ? yTickFormat(tv) : tv.toFixed(0))))),
+            data.map((row, i) => {
+                const slotX = padding.left + slotW * i;
+                const barX = slotX + (slotW - barW) / 2;
+                let posOffset = 0, negOffset = 0;
+                return (React.createElement("g", { key: i },
+                    bars.map((b) => {
+                        const v = row[b.key] || 0;
+                        let y, h;
+                        if (v >= 0) {
+                            y = yAt(posOffset + v);
+                            h = zeroY - y - (yAt(posOffset) - zeroY < 0 ? 0 : 0);
+                            h = Math.max(yAt(posOffset) - yAt(posOffset + v), 0);
+                            posOffset += v;
+                        }
+                        else {
+                            y = yAt(negOffset);
+                            h = Math.max(yAt(negOffset + v) - yAt(negOffset), 0);
+                            negOffset += v;
+                        }
+                        return React.createElement("rect", { key: b.key, x: barX, y: y, width: barW, height: h, fill: b.color, opacity: hoverIdx === i ? 1 : 0.85 });
+                    }),
+                    React.createElement("text", { x: slotX + slotW / 2, y: height - 6, fontSize: "11", fill: MUTED, textAnchor: "middle" }, row.year)));
+            }),
+            React.createElement("line", { x1: padding.left, x2: width - padding.right, y1: zeroY, y2: zeroY, stroke: MUTED, strokeWidth: 1 }),
+            hoverIdx !== null && (React.createElement("line", { x1: hoverX, x2: hoverX, y1: padding.top, y2: height - padding.bottom, stroke: MUTED, strokeDasharray: "2 2" }))),
+        hoverRow && (React.createElement("div", { style: {
+                position: "absolute", left: tooltipLeftPct + "%", top: 6,
+                background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 10px",
+                fontSize: 11, pointerEvents: "none", whiteSpace: "nowrap", zIndex: 2
+            } },
+            React.createElement("div", { className: "mono", style: { color: MUTED, marginBottom: 3 } }, hoverRow.year),
+            bars.map((b) => (React.createElement("div", { key: b.key, className: "mono", style: { color: b.color } },
+                b.label,
+                ": ",
+                tooltipFormat ? tooltipFormat(hoverRow[b.key]) : hoverRow[b.key]))))),
+        React.createElement("div", { style: { display: "flex", gap: 12, flexWrap: "wrap", marginTop: 6, paddingLeft: padding.left, fontSize: 11 } }, bars.map((b) => (React.createElement("div", { key: b.key, style: { display: "flex", alignItems: "center", gap: 4, color: MUTED } },
+            React.createElement("span", { style: { width: 10, height: 10, background: b.color, display: "inline-block", borderRadius: 2 } }),
+            b.label))))));
+}
 function Btn({ children, onClick, variant = "primary", disabled, style, title }) {
     const base = {
         display: "inline-flex", alignItems: "center", gap: 6,
@@ -639,6 +757,9 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const [cashBalances, setCashBalances] = useState([]); // {id, date, amountUSD, amountKRW} - account cash snapshot on that date
     const [holdingsOrder, setHoldingsOrder] = useState([]); // [ticker, ...] — user's manual display order for the holdings table
     const [fxCache, setFxCache] = useState({}); // { date: usdKrwRate } - accumulated from every price/fx lookup ever made
+    const [activePage, setActivePage] = useState("portfolio"); // "portfolio" | "income" - top-level page switch
+    const [salaryRecords, setSalaryRecords] = useState([]); // {id, date (YYYY-MM), category, amount} - global, shared across all accounts
+    const [otherIncomeRecords, setOtherIncomeRecords] = useState([]); // {id, date (YYYY-MM-DD), category, description, amount, deduction} - global
     const recordFx = useCallback((date, fx) => {
         if (!date || !fx)
             return;
@@ -657,9 +778,9 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const [txForm, setTxForm] = useState({ type: "buy", ticker: "", qty: "", priceUSD: "", priceKRW: "", date: todayStr() });
     const [checkpointDate, setCheckpointDate] = useState(todayStr());
     const [manualEntry, setManualEntry] = useState({ priceUSD: "", priceKRW: "" });
-    const [principalForm, setPrincipalForm] = useState({ date: todayStr(), amountUSD: "", amountKRW: "" });
+    const [principalForm, setPrincipalForm] = useState({ type: "deposit", date: todayStr(), amountUSD: "", amountKRW: "" });
     const [editingPrincipalId, setEditingPrincipalId] = useState(null);
-    const [editPrincipalForm, setEditPrincipalForm] = useState({ date: "", amountUSD: "", amountKRW: "" });
+    const [editPrincipalForm, setEditPrincipalForm] = useState({ type: "deposit", date: "", amountUSD: "", amountKRW: "" });
     const [dividendForm, setDividendForm] = useState({ ticker: "", date: todayStr(), preTaxUSD: "", preTaxKRW: "", postTaxUSD: "", postTaxKRW: "" });
     const [editingDividendId, setEditingDividendId] = useState(null);
     const [editDividendForm, setEditDividendForm] = useState({ ticker: "", date: "", preTaxUSD: "", preTaxKRW: "", postTaxUSD: "", postTaxKRW: "" });
@@ -750,6 +871,9 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setActiveAccountId(defaultId);
                     setAllAccountData({ [defaultId]: emptySlice() });
                 }
+                // salary/other-income are global (not per-account) — load regardless of which branch above ran
+                setSalaryRecords((parsed && parsed.salaryRecords) || []);
+                setOtherIncomeRecords((parsed && parsed.otherIncomeRecords) || []);
                 setLoaded(true);
             }
             catch (e) {
@@ -770,19 +894,19 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         }));
     }, [transactions, priceCache, principal, dividends, interestIncome, cashBalances, holdingsOrder, loaded, activeAccountId]);
     // persist everything whenever the account list, active account, any
-    // account's data, or the shared fx cache changes
+    // account's data, the shared fx cache, or global salary/other-income data changes
     useEffect(() => {
         if (!loaded)
             return;
         (async () => {
             try {
-                await window.storage.set(STORAGE_KEY, JSON.stringify({ accounts, activeAccountId, accountData: allAccountData, fxCache }), false);
+                await window.storage.set(STORAGE_KEY, JSON.stringify({ accounts, activeAccountId, accountData: allAccountData, fxCache, salaryRecords, otherIncomeRecords }), false);
             }
             catch (e) {
                 console.error("저장 실패", e);
             }
         })();
-    }, [accounts, activeAccountId, allAccountData, fxCache, loaded]);
+    }, [accounts, activeAccountId, allAccountData, fxCache, salaryRecords, otherIncomeRecords, loaded]);
     const switchAccount = (id) => {
         if (id === activeAccountId)
             return;
@@ -840,7 +964,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const exportAllData = () => {
         // export ALL accounts, not just the currently active one
         const fullData = { ...allAccountData, [activeAccountId]: { transactions, priceCache, principal, dividends, interestIncome, cashBalances, holdingsOrder } };
-        const blob = new Blob([JSON.stringify({ accounts, activeAccountId, accountData: fullData, fxCache }, null, 2)], { type: "application/json" });
+        const blob = new Blob([JSON.stringify({ accounts, activeAccountId, accountData: fullData, fxCache, salaryRecords, otherIncomeRecords }, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -884,6 +1008,8 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                     setHoldingsOrder(parsed.holdingsOrder || []);
                 }
                 setFxCache(parsed.fxCache || {});
+                setSalaryRecords(parsed.salaryRecords || []);
+                setOtherIncomeRecords(parsed.otherIncomeRecords || []);
                 setImportDataMsg(`✓ "${file.name}"의 데이터를 불러왔습니다.`);
             }
             catch (e) {
@@ -892,6 +1018,111 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         };
         reader.readAsText(file);
     };
+    // ---- salary records (global) ----
+    const [salaryForm, setSalaryForm] = useState({ date: todayStr().slice(0, 7), category: SALARY_CATEGORIES[0], amount: "" });
+    const [editingSalaryId, setEditingSalaryId] = useState(null);
+    const [editSalaryForm, setEditSalaryForm] = useState({ date: "", category: SALARY_CATEGORIES[0], amount: "" });
+    const addSalaryRecord = () => {
+        const amount = parseFloat(salaryForm.amount);
+        if (!salaryForm.date || !salaryForm.category || isNaN(amount) || amount === 0) {
+            setErrorMsg("월, 항목, 금액을 입력해주세요.");
+            return;
+        }
+        setErrorMsg("");
+        setSalaryRecords((prev) => [...prev, { id: uid(), date: salaryForm.date, category: salaryForm.category, amount }]
+            .sort((a, b) => a.date.localeCompare(b.date)));
+        setSalaryForm((f) => ({ ...f, amount: "" }));
+    };
+    const deleteSalaryRecord = (id) => setSalaryRecords((prev) => prev.filter((r) => r.id !== id));
+    const startEditSalary = (r) => {
+        setEditingSalaryId(r.id);
+        setEditSalaryForm({ date: r.date, category: r.category, amount: String(r.amount) });
+    };
+    const saveEditSalary = () => {
+        const amount = parseFloat(editSalaryForm.amount);
+        if (!editSalaryForm.date || !editSalaryForm.category || isNaN(amount) || amount === 0) {
+            setErrorMsg("월, 항목, 금액을 입력해주세요.");
+            return;
+        }
+        setErrorMsg("");
+        setSalaryRecords((prev) => prev.map((r) => (r.id === editingSalaryId ? { ...r, date: editSalaryForm.date, category: editSalaryForm.category, amount } : r))
+            .sort((a, b) => a.date.localeCompare(b.date)));
+        setEditingSalaryId(null);
+    };
+    // ---- other income records (global) ----
+    const [otherIncomeForm, setOtherIncomeForm] = useState({ date: todayStr(), category: OTHER_INCOME_CATEGORIES[0], description: "", amount: "", deduction: "" });
+    const [editingOtherIncomeId, setEditingOtherIncomeId] = useState(null);
+    const [editOtherIncomeForm, setEditOtherIncomeForm] = useState({ date: "", category: OTHER_INCOME_CATEGORIES[0], description: "", amount: "", deduction: "" });
+    const addOtherIncome = () => {
+        const amount = parseFloat(otherIncomeForm.amount) || 0;
+        const deduction = parseFloat(otherIncomeForm.deduction) || 0;
+        if (!otherIncomeForm.date || !otherIncomeForm.category || !amount) {
+            setErrorMsg("날짜, 항목, 액수를 입력해주세요.");
+            return;
+        }
+        setErrorMsg("");
+        setOtherIncomeRecords((prev) => [...prev, { id: uid(), date: otherIncomeForm.date, category: otherIncomeForm.category, description: otherIncomeForm.description, amount, deduction }]
+            .sort((a, b) => a.date.localeCompare(b.date)));
+        setOtherIncomeForm({ date: todayStr(), category: otherIncomeForm.category, description: "", amount: "", deduction: "" });
+    };
+    const deleteOtherIncome = (id) => setOtherIncomeRecords((prev) => prev.filter((r) => r.id !== id));
+    const startEditOtherIncome = (r) => {
+        setEditingOtherIncomeId(r.id);
+        setEditOtherIncomeForm({
+            date: r.date, category: r.category, description: r.description || "",
+            amount: String(r.amount), deduction: r.deduction ? String(r.deduction) : ""
+        });
+    };
+    const saveEditOtherIncome = () => {
+        const amount = parseFloat(editOtherIncomeForm.amount) || 0;
+        const deduction = parseFloat(editOtherIncomeForm.deduction) || 0;
+        if (!editOtherIncomeForm.date || !editOtherIncomeForm.category || !amount) {
+            setErrorMsg("날짜, 항목, 액수를 입력해주세요.");
+            return;
+        }
+        setErrorMsg("");
+        setOtherIncomeRecords((prev) => prev.map((r) => (r.id === editingOtherIncomeId
+            ? { ...r, date: editOtherIncomeForm.date, category: editOtherIncomeForm.category, description: editOtherIncomeForm.description, amount, deduction }
+            : r))
+            .sort((a, b) => a.date.localeCompare(b.date)));
+        setEditingOtherIncomeId(null);
+    };
+    // ---- salary: pivot by month, and yearly totals combining salary + other income ----
+    const salaryByMonth = useMemo(() => {
+        const map = {};
+        for (const r of salaryRecords) {
+            if (!map[r.date])
+                map[r.date] = {};
+            map[r.date][r.category] = (map[r.date][r.category] || 0) + r.amount;
+        }
+        return map;
+    }, [salaryRecords]);
+    const salaryMonthRows = useMemo(() => {
+        return Object.keys(salaryByMonth).sort().map((month) => {
+            const cats = salaryByMonth[month];
+            const gross = SALARY_CATEGORIES.reduce((s, c) => s + (cats[c] || 0), 0);
+            const deduction = cats[DEDUCTION_CATEGORY] || 0;
+            return { month, cats, gross, deduction, net: gross - deduction };
+        });
+    }, [salaryByMonth]);
+    const yearlyIncomeTotals = useMemo(() => {
+        const map = {}; // fiscalYearStart -> { salary, other }
+        for (const row of salaryMonthRows) {
+            const year = fiscalYearOf(row.month);
+            if (!map[year])
+                map[year] = { salary: 0, other: 0 };
+            map[year].salary += row.net;
+        }
+        for (const r of otherIncomeRecords) {
+            const year = fiscalYearOf(r.date);
+            if (!map[year])
+                map[year] = { salary: 0, other: 0 };
+            map[year].other += (r.amount || 0) - (r.deduction || 0);
+        }
+        return Object.keys(map).map(Number).sort((a, b) => a - b).map((year) => ({
+            year: fiscalYearLabel(year), 연봉: map[year].salary, 기타소득: map[year].other, 총수입: map[year].salary + map[year].other
+        }));
+    }, [salaryMonthRows, otherIncomeRecords]);
     // ---- transaction handling ----
     const addTransaction = () => {
         const type = txForm.type === "sell" ? "sell" : "buy";
@@ -1346,9 +1577,13 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     };
     const startEditPrincipal = (p) => {
         setEditingPrincipalId(p.id);
-        setEditPrincipalForm({ date: p.date, amountUSD: p.amountUSD ? String(p.amountUSD) : "", amountKRW: p.amountKRW ? String(p.amountKRW) : "" });
+        setEditPrincipalForm({
+            type: p.type === "withdrawal" ? "withdrawal" : "deposit",
+            date: p.date, amountUSD: p.amountUSD ? String(p.amountUSD) : "", amountKRW: p.amountKRW ? String(p.amountKRW) : ""
+        });
     };
     const saveEditPrincipal = () => {
+        const type = editPrincipalForm.type === "withdrawal" ? "withdrawal" : "deposit";
         const amountUSD = parseFloat(editPrincipalForm.amountUSD) || 0;
         const amountKRW = parseFloat(editPrincipalForm.amountKRW) || 0;
         if (!editPrincipalForm.date || (!amountUSD && !amountKRW)) {
@@ -1357,7 +1592,7 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         }
         setErrorMsg("");
         setPrincipal((prev) => prev
-            .map((p) => (p.id === editingPrincipalId ? { ...p, date: editPrincipalForm.date, amountUSD, amountKRW } : p))
+            .map((p) => (p.id === editingPrincipalId ? { ...p, type, date: editPrincipalForm.date, amountUSD, amountKRW } : p))
             .sort((a, b) => a.date.localeCompare(b.date)));
         setEditingPrincipalId(null);
     };
@@ -1513,8 +1748,9 @@ function PortfolioTracker({ onSignOut, userEmail }) {
     const principalTotals = useMemo(() => {
         let usd = 0, krw = 0;
         for (const p of principal) {
-            usd += p.amountUSD || 0;
-            krw += p.amountKRW || 0;
+            const sign = p.type === "withdrawal" ? -1 : 1;
+            usd += sign * (p.amountUSD || 0);
+            krw += sign * (p.amountKRW || 0);
         }
         return { usd, krw };
     }, [principal]);
@@ -1715,8 +1951,10 @@ function PortfolioTracker({ onSignOut, userEmail }) {
                 }
             }
             while (principalIdx < sortedPrincipal.length && sortedPrincipal[principalIdx].date <= date) {
-                cumPrincipalUSD += sortedPrincipal[principalIdx].amountUSD || 0;
-                cumPrincipalKRW += sortedPrincipal[principalIdx].amountKRW || 0;
+                const pr = sortedPrincipal[principalIdx];
+                const sign = pr.type === "withdrawal" ? -1 : 1;
+                cumPrincipalUSD += sign * (pr.amountUSD || 0);
+                cumPrincipalKRW += sign * (pr.amountKRW || 0);
                 principalIdx++;
             }
             while (dividendIdx < sortedDividends.length && sortedDividends[dividendIdx].date <= date) {
@@ -1789,492 +2027,637 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `),
         React.createElement("div", { style: { maxWidth: 980, margin: "0 auto" } },
-            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 14 } },
-                accounts.map((acc) => {
-                    const active = acc.id === activeAccountId;
-                    if (renamingAccountId === acc.id) {
-                        return (React.createElement("div", { key: acc.id, style: { display: "flex", alignItems: "center", gap: 4 } },
-                            React.createElement("input", { autoFocus: true, style: { ...inputStyle, width: 120, padding: "5px 8px", fontSize: 12 }, value: renameAccountValue, onChange: (e) => setRenameAccountValue(e.target.value), onKeyDown: (e) => { if (e.key === "Enter") {
-                                    renameAccount(acc.id, renameAccountValue);
-                                    setRenamingAccountId(null);
-                                } } }),
-                            React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer" }, onClick: () => { renameAccount(acc.id, renameAccountValue); setRenamingAccountId(null); } }),
-                            React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setRenamingAccountId(null) })));
-                    }
-                    return (React.createElement("div", { key: acc.id, style: {
-                            display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20,
-                            border: `1px solid ${active ? INK : LINE}`, background: active ? "rgba(201,162,75,0.1)" : "transparent",
-                            cursor: "pointer", fontSize: 13
+            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 16 } },
+                React.createElement(Btn, { variant: activePage === "portfolio" ? "primary" : "ghost", onClick: () => setActivePage("portfolio") }, "\uD3EC\uD2B8\uD3F4\uB9AC\uC624"),
+                React.createElement(Btn, { variant: activePage === "income" ? "primary" : "ghost", onClick: () => setActivePage("income") }, "\uC5F0\uBD09\u00B7\uAE30\uD0C0\uC18C\uB4DD")),
+            activePage === "income" ? (React.createElement(IncomeSection, { salaryRecords: salaryRecords, salaryMonthRows: salaryMonthRows, salaryForm: salaryForm, setSalaryForm: setSalaryForm, addSalaryRecord: addSalaryRecord, deleteSalaryRecord: deleteSalaryRecord, editingSalaryId: editingSalaryId, setEditingSalaryId: setEditingSalaryId, editSalaryForm: editSalaryForm, setEditSalaryForm: setEditSalaryForm, startEditSalary: startEditSalary, saveEditSalary: saveEditSalary, otherIncomeRecords: otherIncomeRecords, otherIncomeForm: otherIncomeForm, setOtherIncomeForm: setOtherIncomeForm, addOtherIncome: addOtherIncome, deleteOtherIncome: deleteOtherIncome, editingOtherIncomeId: editingOtherIncomeId, setEditingOtherIncomeId: setEditingOtherIncomeId, editOtherIncomeForm: editOtherIncomeForm, setEditOtherIncomeForm: setEditOtherIncomeForm, startEditOtherIncome: startEditOtherIncome, saveEditOtherIncome: saveEditOtherIncome, yearlyIncomeTotals: yearlyIncomeTotals, errorMsg: errorMsg })) : (React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 14 } },
+                    accounts.map((acc) => {
+                        const active = acc.id === activeAccountId;
+                        if (renamingAccountId === acc.id) {
+                            return (React.createElement("div", { key: acc.id, style: { display: "flex", alignItems: "center", gap: 4 } },
+                                React.createElement("input", { autoFocus: true, style: { ...inputStyle, width: 120, padding: "5px 8px", fontSize: 12 }, value: renameAccountValue, onChange: (e) => setRenameAccountValue(e.target.value), onKeyDown: (e) => { if (e.key === "Enter") {
+                                        renameAccount(acc.id, renameAccountValue);
+                                        setRenamingAccountId(null);
+                                    } } }),
+                                React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer" }, onClick: () => { renameAccount(acc.id, renameAccountValue); setRenamingAccountId(null); } }),
+                                React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setRenamingAccountId(null) })));
+                        }
+                        return (React.createElement("div", { key: acc.id, style: {
+                                display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20,
+                                border: `1px solid ${active ? INK : LINE}`, background: active ? "rgba(201,162,75,0.1)" : "transparent",
+                                cursor: "pointer", fontSize: 13
+                            } },
+                            React.createElement("span", { onClick: () => switchAccount(acc.id), style: { fontWeight: active ? 700 : 400, color: active ? INK : TEXT } }, acc.name),
+                            React.createElement(Pencil, { size: 11, color: MUTED, onClick: () => { setRenamingAccountId(acc.id); setRenameAccountValue(acc.name); } }),
+                            accounts.length > 1 && (confirmDeleteAccountId === acc.id ? (React.createElement("span", { style: { display: "flex", gap: 4, alignItems: "center" } },
+                                React.createElement("span", { style: { fontSize: 11, color: LOSS } }, "\uC0AD\uC81C?"),
+                                React.createElement(Check, { size: 12, color: LOSS, onClick: () => { deleteAccount(acc.id); setConfirmDeleteAccountId(null); } }),
+                                React.createElement(X, { size: 12, color: MUTED, onClick: () => setConfirmDeleteAccountId(null) }))) : (React.createElement(Trash2, { size: 11, color: MUTED, onClick: () => setConfirmDeleteAccountId(acc.id) })))));
+                    }),
+                    addingAccount ? (React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4 } },
+                        React.createElement("input", { autoFocus: true, style: { ...inputStyle, width: 120, padding: "5px 8px", fontSize: 12 }, placeholder: `계좌 ${accounts.length + 1}`, value: newAccountName, onChange: (e) => setNewAccountName(e.target.value), onKeyDown: (e) => { if (e.key === "Enter") {
+                                addAccount(newAccountName);
+                                setAddingAccount(false);
+                                setNewAccountName("");
+                            } } }),
+                        React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer" }, onClick: () => { addAccount(newAccountName); setAddingAccount(false); setNewAccountName(""); } }),
+                        React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => { setAddingAccount(false); setNewAccountName(""); } }))) : (React.createElement(Btn, { variant: "ghost", style: { padding: "6px 12px", fontSize: 12, borderRadius: 20 }, onClick: () => setAddingAccount(true) },
+                        React.createElement(Plus, { size: 12 }),
+                        " \uACC4\uC88C \uCD94\uAC00"))),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 4 } },
+                    React.createElement("div", null,
+                        React.createElement("div", { style: { fontSize: 11, letterSpacing: "2px", color: INK_SOFT, textTransform: "uppercase", marginBottom: 2 } }, "Ledger \u00B7 \uC790\uC0B0 \uB300\uC7A5"),
+                        React.createElement("h1", { style: { fontSize: 24, fontWeight: 700, margin: 0 } }, "\uBCF4\uC720 \uC790\uC0B0 \uD604\uD669")),
+                    React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 } },
+                        React.createElement("div", { style: { display: "flex", gap: 6 } },
+                            React.createElement("input", { ref: exportInputRef, type: "file", accept: ".json", style: { display: "none" }, onChange: (e) => {
+                                    const file = e.target.files && e.target.files[0];
+                                    if (file)
+                                        importAllData(file);
+                                    e.target.value = "";
+                                } }),
+                            React.createElement(Btn, { variant: "ghost", style: { padding: "5px 10px", fontSize: 12 }, onClick: () => exportInputRef.current && exportInputRef.current.click() }, "\uB370\uC774\uD130 \uAC00\uC838\uC624\uAE30"),
+                            React.createElement(Btn, { variant: "ghost", style: { padding: "5px 10px", fontSize: 12 }, onClick: exportAllData }, "\uB370\uC774\uD130 \uB0B4\uBCF4\uB0B4\uAE30"),
+                            onSignOut && (React.createElement(Btn, { variant: "ghost", style: { padding: "5px 10px", fontSize: 12, color: LOSS }, onClick: onSignOut }, "\uB85C\uADF8\uC544\uC6C3"))),
+                        userEmail && React.createElement("div", { style: { fontSize: 11, color: MUTED } },
+                            userEmail,
+                            "\uB85C \uB85C\uADF8\uC778\uB428"),
+                        importDataMsg && React.createElement("div", { style: { fontSize: 11, color: MUTED, maxWidth: 260, textAlign: "right" } }, importDataMsg))),
+                errorMsg && (React.createElement("div", { style: { background: "#2A1B1B", border: `1px solid ${LOSS}55`, color: LOSS, padding: "8px 12px", borderRadius: 6, fontSize: 13, margin: "10px 0" } }, errorMsg)),
+                React.createElement(Panel, { style: { padding: 18, marginTop: 14, marginBottom: 20 } },
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 16 } },
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uD604\uC7AC \uD3C9\uAC00\uAE08\uC561"),
+                            React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700 } }, fmtUSD(totalsToday.valUSD)),
+                            React.createElement("div", { className: "mono", style: { fontSize: 13, color: MUTED } }, fmtKRW(totalsToday.valKRW)),
+                            totalsToday.missing && React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 2 } }, "\uC77C\uBD80 \uC885\uBAA9 \uD604\uC7AC\uAC00 \uBBF8\uC870\uD68C")),
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uCD1D \uB9E4\uC785\uC6D0\uAC00"),
+                            React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: MUTED } }, fmtUSD(totalsToday.costUSD)),
+                            React.createElement("div", { className: "mono", style: { fontSize: 13, color: MUTED } }, fmtKRW(totalsToday.costKRW))),
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB204\uC801 \uD22C\uC785 \uC6D0\uAE08"),
+                            React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: INK } }, fmtUSD(principalTotals.usd)),
+                            React.createElement("div", { className: "mono", style: { fontSize: 13, color: MUTED } }, fmtKRW(principalTotals.krw))),
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uC6D0\uAE08 \uB300\uBE44 \uC218\uC775\uB960"),
+                            React.createElement("div", { className: "mono", style: { fontSize: 15, fontWeight: 700, color: currentReturnUSD >= 0 ? GAIN : LOSS } },
+                                "$ ",
+                                fmtPct(currentReturnUSD)),
+                            React.createElement("div", { className: "mono", style: { fontSize: 15, fontWeight: 700, color: currentReturnKRW >= 0 ? GAIN : LOSS } },
+                                "\u20A9 ",
+                                fmtPct(currentReturnKRW))),
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB9E4\uB3C4\uB85C \uC2E4\uD604\uD55C \uC190\uC775"),
+                            React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: totalsToday.realizedUSD >= 0 ? GAIN : LOSS } }, fmtUSD(totalsToday.realizedUSD)),
+                            React.createElement("div", { className: "mono", style: { fontSize: 13, color: totalsToday.realizedKRW >= 0 ? GAIN : LOSS } }, fmtKRW(totalsToday.realizedKRW))),
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB204\uC801 \uBC30\uB2F9\uAE08 (\uC138\uD6C4)"),
+                            React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: DIV_COLOR } }, fmtUSD(dividendTotalsAll.postUSD)),
+                            React.createElement("div", { className: "mono", style: { fontSize: 13, color: DIV_COLOR } }, fmtKRW(dividendTotalsAll.postKRW)),
+                            React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 2 } },
+                                "\uC138\uC804 ",
+                                fmtUSD(dividendTotalsAll.preUSD),
+                                " / ",
+                                fmtKRW(dividendTotalsAll.preKRW))),
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB204\uC801 \uC774\uC790\uC218\uC785 (\uC138\uD6C4)"),
+                            React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: INTEREST_COLOR } }, fmtUSD(interestTotalsAll.postUSD)),
+                            React.createElement("div", { className: "mono", style: { fontSize: 13, color: INTEREST_COLOR } }, fmtKRW(interestTotalsAll.postKRW)),
+                            React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 2 } },
+                                "\uC138\uC804 ",
+                                fmtUSD(interestTotalsAll.preUSD),
+                                " / ",
+                                fmtKRW(interestTotalsAll.preKRW))))),
+                React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 } },
+                        React.createElement("div", { style: { fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
+                            React.createElement(Plus, { size: 16, color: INK }),
+                            " \uAC70\uB798 \uCD94\uAC00"),
+                        React.createElement("div", { style: { display: "flex", gap: 6 } },
+                            React.createElement(Btn, { variant: txForm.type === "buy" ? "primary" : "ghost", onClick: () => setTxForm((f) => ({ ...f, type: "buy" })), style: { padding: "5px 14px" } }, "\uB9E4\uC218"),
+                            React.createElement(Btn, { variant: txForm.type === "sell" ? "primary" : "ghost", onClick: () => setTxForm((f) => ({ ...f, type: "sell" })), style: txForm.type === "sell" ? { padding: "5px 14px", background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010" } : { padding: "5px 14px" } }, "\uB9E4\uB3C4"))),
+                    React.createElement("div", { style: {
+                            border: `1px dashed ${LINE}`, borderRadius: 6, padding: 14, marginBottom: 16,
+                            display: "flex", flexDirection: "column", gap: 10
                         } },
-                        React.createElement("span", { onClick: () => switchAccount(acc.id), style: { fontWeight: active ? 700 : 400, color: active ? INK : TEXT } }, acc.name),
-                        React.createElement(Pencil, { size: 11, color: MUTED, onClick: () => { setRenamingAccountId(acc.id); setRenameAccountValue(acc.name); } }),
-                        accounts.length > 1 && (confirmDeleteAccountId === acc.id ? (React.createElement("span", { style: { display: "flex", gap: 4, alignItems: "center" } },
-                            React.createElement("span", { style: { fontSize: 11, color: LOSS } }, "\uC0AD\uC81C?"),
-                            React.createElement(Check, { size: 12, color: LOSS, onClick: () => { deleteAccount(acc.id); setConfirmDeleteAccountId(null); } }),
-                            React.createElement(X, { size: 12, color: MUTED, onClick: () => setConfirmDeleteAccountId(null) }))) : (React.createElement(Trash2, { size: 11, color: MUTED, onClick: () => setConfirmDeleteAccountId(acc.id) })))));
-                }),
-                addingAccount ? (React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4 } },
-                    React.createElement("input", { autoFocus: true, style: { ...inputStyle, width: 120, padding: "5px 8px", fontSize: 12 }, placeholder: `계좌 ${accounts.length + 1}`, value: newAccountName, onChange: (e) => setNewAccountName(e.target.value), onKeyDown: (e) => { if (e.key === "Enter") {
-                            addAccount(newAccountName);
-                            setAddingAccount(false);
-                            setNewAccountName("");
-                        } } }),
-                    React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer" }, onClick: () => { addAccount(newAccountName); setAddingAccount(false); setNewAccountName(""); } }),
-                    React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => { setAddingAccount(false); setNewAccountName(""); } }))) : (React.createElement(Btn, { variant: "ghost", style: { padding: "6px 12px", fontSize: 12, borderRadius: 20 }, onClick: () => setAddingAccount(true) },
-                    React.createElement(Plus, { size: 12 }),
-                    " \uACC4\uC88C \uCD94\uAC00"))),
-            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 4 } },
-                React.createElement("div", null,
-                    React.createElement("div", { style: { fontSize: 11, letterSpacing: "2px", color: INK_SOFT, textTransform: "uppercase", marginBottom: 2 } }, "Ledger \u00B7 \uC790\uC0B0 \uB300\uC7A5"),
-                    React.createElement("h1", { style: { fontSize: 24, fontWeight: 700, margin: 0 } }, "\uBCF4\uC720 \uC790\uC0B0 \uD604\uD669")),
-                React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 } },
-                    React.createElement("div", { style: { display: "flex", gap: 6 } },
-                        React.createElement("input", { ref: exportInputRef, type: "file", accept: ".json", style: { display: "none" }, onChange: (e) => {
-                                const file = e.target.files && e.target.files[0];
-                                if (file)
-                                    importAllData(file);
-                                e.target.value = "";
-                            } }),
-                        React.createElement(Btn, { variant: "ghost", style: { padding: "5px 10px", fontSize: 12 }, onClick: () => exportInputRef.current && exportInputRef.current.click() }, "\uB370\uC774\uD130 \uAC00\uC838\uC624\uAE30"),
-                        React.createElement(Btn, { variant: "ghost", style: { padding: "5px 10px", fontSize: 12 }, onClick: exportAllData }, "\uB370\uC774\uD130 \uB0B4\uBCF4\uB0B4\uAE30"),
-                        onSignOut && (React.createElement(Btn, { variant: "ghost", style: { padding: "5px 10px", fontSize: 12, color: LOSS }, onClick: onSignOut }, "\uB85C\uADF8\uC544\uC6C3"))),
-                    userEmail && React.createElement("div", { style: { fontSize: 11, color: MUTED } },
-                        userEmail,
-                        "\uB85C \uB85C\uADF8\uC778\uB428"),
-                    importDataMsg && React.createElement("div", { style: { fontSize: 11, color: MUTED, maxWidth: 260, textAlign: "right" } }, importDataMsg))),
-            errorMsg && (React.createElement("div", { style: { background: "#2A1B1B", border: `1px solid ${LOSS}55`, color: LOSS, padding: "8px 12px", borderRadius: 6, fontSize: 13, margin: "10px 0" } }, errorMsg)),
-            React.createElement(Panel, { style: { padding: 18, marginTop: 14, marginBottom: 20 } },
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 16 } },
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uD604\uC7AC \uD3C9\uAC00\uAE08\uC561"),
-                        React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700 } }, fmtUSD(totalsToday.valUSD)),
-                        React.createElement("div", { className: "mono", style: { fontSize: 13, color: MUTED } }, fmtKRW(totalsToday.valKRW)),
-                        totalsToday.missing && React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 2 } }, "\uC77C\uBD80 \uC885\uBAA9 \uD604\uC7AC\uAC00 \uBBF8\uC870\uD68C")),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uCD1D \uB9E4\uC785\uC6D0\uAC00"),
-                        React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: MUTED } }, fmtUSD(totalsToday.costUSD)),
-                        React.createElement("div", { className: "mono", style: { fontSize: 13, color: MUTED } }, fmtKRW(totalsToday.costKRW))),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB204\uC801 \uD22C\uC785 \uC6D0\uAE08"),
-                        React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: INK } }, fmtUSD(principalTotals.usd)),
-                        React.createElement("div", { className: "mono", style: { fontSize: 13, color: MUTED } }, fmtKRW(principalTotals.krw))),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uC6D0\uAE08 \uB300\uBE44 \uC218\uC775\uB960"),
-                        React.createElement("div", { className: "mono", style: { fontSize: 15, fontWeight: 700, color: currentReturnUSD >= 0 ? GAIN : LOSS } },
-                            "$ ",
-                            fmtPct(currentReturnUSD)),
-                        React.createElement("div", { className: "mono", style: { fontSize: 15, fontWeight: 700, color: currentReturnKRW >= 0 ? GAIN : LOSS } },
-                            "\u20A9 ",
-                            fmtPct(currentReturnKRW))),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB9E4\uB3C4\uB85C \uC2E4\uD604\uD55C \uC190\uC775"),
-                        React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: totalsToday.realizedUSD >= 0 ? GAIN : LOSS } }, fmtUSD(totalsToday.realizedUSD)),
-                        React.createElement("div", { className: "mono", style: { fontSize: 13, color: totalsToday.realizedKRW >= 0 ? GAIN : LOSS } }, fmtKRW(totalsToday.realizedKRW))),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB204\uC801 \uBC30\uB2F9\uAE08 (\uC138\uD6C4)"),
-                        React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: DIV_COLOR } }, fmtUSD(dividendTotalsAll.postUSD)),
-                        React.createElement("div", { className: "mono", style: { fontSize: 13, color: DIV_COLOR } }, fmtKRW(dividendTotalsAll.postKRW)),
-                        React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 2 } },
-                            "\uC138\uC804 ",
-                            fmtUSD(dividendTotalsAll.preUSD),
-                            " / ",
-                            fmtKRW(dividendTotalsAll.preKRW))),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 4 } }, "\uB204\uC801 \uC774\uC790\uC218\uC785 (\uC138\uD6C4)"),
-                        React.createElement("div", { className: "mono", style: { fontSize: 18, fontWeight: 700, color: INTEREST_COLOR } }, fmtUSD(interestTotalsAll.postUSD)),
-                        React.createElement("div", { className: "mono", style: { fontSize: 13, color: INTEREST_COLOR } }, fmtKRW(interestTotalsAll.postKRW)),
-                        React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 2 } },
-                            "\uC138\uC804 ",
-                            fmtUSD(interestTotalsAll.preUSD),
-                            " / ",
-                            fmtKRW(interestTotalsAll.preKRW))))),
-            React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
-                React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 } },
-                    React.createElement("div", { style: { fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
-                        React.createElement(Plus, { size: 16, color: INK }),
-                        " \uAC70\uB798 \uCD94\uAC00"),
-                    React.createElement("div", { style: { display: "flex", gap: 6 } },
-                        React.createElement(Btn, { variant: txForm.type === "buy" ? "primary" : "ghost", onClick: () => setTxForm((f) => ({ ...f, type: "buy" })), style: { padding: "5px 14px" } }, "\uB9E4\uC218"),
-                        React.createElement(Btn, { variant: txForm.type === "sell" ? "primary" : "ghost", onClick: () => setTxForm((f) => ({ ...f, type: "sell" })), style: txForm.type === "sell" ? { padding: "5px 14px", background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010" } : { padding: "5px 14px" } }, "\uB9E4\uB3C4"))),
-                React.createElement("div", { style: {
-                        border: `1px dashed ${LINE}`, borderRadius: 6, padding: 14, marginBottom: 16,
-                        display: "flex", flexDirection: "column", gap: 10
-                    } },
-                    React.createElement("div", { style: { fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
-                        React.createElement(Upload, { size: 14, color: INK }),
-                        " \uC5D1\uC140\uB85C \uB9E4\uC218/\uB9E4\uB3C4 \uB0B4\uC5ED \uD55C \uBC88\uC5D0 \uAC00\uC838\uC624\uAE30"),
-                    React.createElement("div", { style: { fontSize: 11, color: MUTED } }, "1) \uC5D1\uC140 \uD30C\uC77C(.xlsx)\uC744 \uC120\uD0DD\uD558\uACE0 2) \"\uAC00\uC838\uC624\uAE30 \uC2E4\uD589\" \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694. \"\uAC70\uB798\uAD6C\uBD84\"(\uAD6C\uB9E4/\uD310\uB9E4 \uB610\uB294 \uB9E4\uC218/\uB9E4\uB3C4), \"\uD2F0\uCEE4\"(\uB610\uB294 \uC885\uBAA9), \"\uC218\uB7C9\", \"\uB0A0\uC9DC\", \"\uAC1C\uB2F9\uAC00\uACA9 ($/\u20A9)\" \uC5F4\uC774 \uC788\uC73C\uBA74 \uC790\uB3D9\uC73C\uB85C \uC778\uC2DD\uD574\uC694. \uC774\uBBF8 \uB4F1\uB85D\uB41C \uAC83\uACFC \uC644\uC804\uD788 \uAC19\uC740 \uAC70\uB798(\uAD6C\uBD84\u00B7\uD2F0\uCEE4\u00B7\uB0A0\uC9DC\u00B7\uC218\uB7C9\u00B7\uAC00\uACA9\uC774 \uBAA8\uB450 \uAC19\uC740 \uACBD\uC6B0)\uB294 \uC911\uBCF5\uC73C\uB85C \uCD94\uAC00\uB418\uC9C0 \uC54A\uC544\uC694."),
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-                        React.createElement("input", { ref: txFileInputRef, type: "file", accept: ".xlsx,.xls", style: { fontSize: 12, color: TEXT, maxWidth: 260 }, onChange: (e) => {
-                                const file = e.target.files && e.target.files[0];
-                                setPendingTxFile(file || null);
-                                setTxImportStatus("idle");
-                                setTxImportMsg(file ? `선택됨: ${file.name} — "가져오기 실행"을 눌러주세요.` : "");
-                            } }),
-                        React.createElement(Btn, { onClick: () => pendingTxFile && handleTxExcelImport(pendingTxFile), disabled: !pendingTxFile || txImportStatus === "busy", style: { height: 34 } },
-                            txImportStatus === "busy" ? React.createElement(Loader2, { size: 13, className: "spin" }) : React.createElement(Upload, { size: 13 }),
-                            " \uAC00\uC838\uC624\uAE30 \uC2E4\uD589")),
-                    txImportMsg && (React.createElement("div", { style: {
-                            fontSize: 12, padding: "8px 10px", borderRadius: 5,
-                            background: txImportStatus === "error" ? "#2A1B1B" : txImportStatus === "done" ? "#16241F" : PANEL_SOFT,
-                            border: `1px solid ${txImportStatus === "error" ? LOSS + "55" : txImportStatus === "done" ? GAIN + "55" : LINE}`,
-                            color: txImportStatus === "error" ? LOSS : txImportStatus === "done" ? GAIN : MUTED
-                        } }, txImportMsg))),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr auto", gap: 10, alignItems: "end" } },
-                    React.createElement(Field, { label: "\uD2F0\uCEE4" },
-                        React.createElement("input", { style: inputStyle, placeholder: "AAPL", value: txForm.ticker, onChange: (e) => setTxForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() })) })),
-                    React.createElement(Field, { label: "\uC218\uB7C9" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", min: "0", placeholder: "10 \uB610\uB294 0.5", value: txForm.qty, onChange: (e) => setTxForm((f) => ({ ...f, qty: e.target.value })) })),
-                    React.createElement(Field, { label: txForm.type === "sell" ? "매도 가격 ($)" : "개당 가격 ($)" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "150.00", value: txForm.priceUSD, onChange: (e) => setTxForm((f) => ({ ...f, priceUSD: e.target.value })) })),
-                    React.createElement(Field, { label: txForm.type === "sell" ? "매도 가격 (₩)" : "개당 가격 (₩)" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "205000", value: txForm.priceKRW, onChange: (e) => setTxForm((f) => ({ ...f, priceKRW: e.target.value })) })),
-                    React.createElement(Field, { label: txForm.type === "sell" ? "매도 날짜" : "구입 날짜" },
-                        React.createElement("input", { style: inputStyle, type: "date", value: txForm.date, onChange: (e) => setTxForm((f) => ({ ...f, date: e.target.value })) })),
-                    React.createElement(Btn, { onClick: addTransaction, style: txForm.type === "sell"
-                            ? { height: 34, background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010" }
-                            : { height: 34 } }, txForm.type === "sell" ? "매도 추가" : "매수 추가")),
-                React.createElement("div", { style: { marginTop: 10 } },
-                    React.createElement(FxFillButton, { date: txForm.date, setForm: setTxForm, pairs: [["priceUSD", "priceKRW"]], onFx: recordFx }))),
-            React.createElement(Panel, { style: { padding: 0, marginBottom: 20, overflow: "hidden" } },
-                React.createElement("div", { style: {
-                        padding: "14px 18px", borderBottom: `1px solid ${LINE}`,
-                        display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8
-                    } },
-                    React.createElement("div", { style: { fontWeight: 700 } }, "\uBCF4\uC720 \uC885\uBAA9"),
-                    holdings.length > 0 && (confirmClearTx ? (React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
-                        React.createElement("span", { style: { fontSize: 12, color: LOSS } }, "\uBAA8\uB4E0 \uB9E4\uC218/\uB9E4\uB3C4 \uAC70\uB798\uB97C \uC0AD\uC81C\uD560\uAE4C\uC694? (\uBC30\uB2F9\uAE08\u00B7\uC6D0\uAE08 \uAE30\uB85D\uC740 \uC720\uC9C0)"),
-                        React.createElement(Btn, { onClick: clearAllTransactions, style: { background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010", padding: "4px 10px", fontSize: 12 } }, "\uD655\uC778, \uC0AD\uC81C"),
-                        React.createElement(Btn, { variant: "ghost", onClick: () => setConfirmClearTx(false), style: { padding: "4px 10px", fontSize: 12 } }, "\uCDE8\uC18C"))) : (React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
-                        React.createElement(Btn, { variant: "ghost", onClick: fetchAllCurrentPrices, disabled: fetchAllBusy, style: { padding: "4px 10px", fontSize: 12 } },
-                            fetchAllBusy ? React.createElement(Loader2, { size: 12, className: "spin" }) : React.createElement(Search, { size: 12 }),
-                            " \uC804\uCCB4 \uC870\uD68C"),
-                        React.createElement(Btn, { variant: "ghost", onClick: () => setConfirmClearTx(true), style: { padding: "4px 10px", fontSize: 12, color: LOSS } },
-                            React.createElement(Trash2, { size: 12 }),
-                            " \uAC70\uB798 \uB0B4\uC5ED \uC804\uCCB4 \uC0AD\uC81C"))))),
-                holdings.length === 0 ? (React.createElement("div", { style: { padding: 24, textAlign: "center", color: MUTED, fontSize: 13 } }, "\uC544\uC9C1 \uAC70\uB798 \uB0B4\uC5ED\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uC704\uC5D0\uC11C \uCCAB \uAC70\uB798\uB97C \uCD94\uAC00\uD574\uBCF4\uC138\uC694.")) : (React.createElement("div", { style: { overflowX: "auto" } },
-                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                        React.createElement("div", { style: { fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
+                            React.createElement(Upload, { size: 14, color: INK }),
+                            " \uC5D1\uC140\uB85C \uB9E4\uC218/\uB9E4\uB3C4 \uB0B4\uC5ED \uD55C \uBC88\uC5D0 \uAC00\uC838\uC624\uAE30"),
+                        React.createElement("div", { style: { fontSize: 11, color: MUTED } }, "1) \uC5D1\uC140 \uD30C\uC77C(.xlsx)\uC744 \uC120\uD0DD\uD558\uACE0 2) \"\uAC00\uC838\uC624\uAE30 \uC2E4\uD589\" \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694. \"\uAC70\uB798\uAD6C\uBD84\"(\uAD6C\uB9E4/\uD310\uB9E4 \uB610\uB294 \uB9E4\uC218/\uB9E4\uB3C4), \"\uD2F0\uCEE4\"(\uB610\uB294 \uC885\uBAA9), \"\uC218\uB7C9\", \"\uB0A0\uC9DC\", \"\uAC1C\uB2F9\uAC00\uACA9 ($/\u20A9)\" \uC5F4\uC774 \uC788\uC73C\uBA74 \uC790\uB3D9\uC73C\uB85C \uC778\uC2DD\uD574\uC694. \uC774\uBBF8 \uB4F1\uB85D\uB41C \uAC83\uACFC \uC644\uC804\uD788 \uAC19\uC740 \uAC70\uB798(\uAD6C\uBD84\u00B7\uD2F0\uCEE4\u00B7\uB0A0\uC9DC\u00B7\uC218\uB7C9\u00B7\uAC00\uACA9\uC774 \uBAA8\uB450 \uAC19\uC740 \uACBD\uC6B0)\uB294 \uC911\uBCF5\uC73C\uB85C \uCD94\uAC00\uB418\uC9C0 \uC54A\uC544\uC694."),
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+                            React.createElement("input", { ref: txFileInputRef, type: "file", accept: ".xlsx,.xls", style: { fontSize: 12, color: TEXT, maxWidth: 260 }, onChange: (e) => {
+                                    const file = e.target.files && e.target.files[0];
+                                    setPendingTxFile(file || null);
+                                    setTxImportStatus("idle");
+                                    setTxImportMsg(file ? `선택됨: ${file.name} — "가져오기 실행"을 눌러주세요.` : "");
+                                } }),
+                            React.createElement(Btn, { onClick: () => pendingTxFile && handleTxExcelImport(pendingTxFile), disabled: !pendingTxFile || txImportStatus === "busy", style: { height: 34 } },
+                                txImportStatus === "busy" ? React.createElement(Loader2, { size: 13, className: "spin" }) : React.createElement(Upload, { size: 13 }),
+                                " \uAC00\uC838\uC624\uAE30 \uC2E4\uD589")),
+                        txImportMsg && (React.createElement("div", { style: {
+                                fontSize: 12, padding: "8px 10px", borderRadius: 5,
+                                background: txImportStatus === "error" ? "#2A1B1B" : txImportStatus === "done" ? "#16241F" : PANEL_SOFT,
+                                border: `1px solid ${txImportStatus === "error" ? LOSS + "55" : txImportStatus === "done" ? GAIN + "55" : LINE}`,
+                                color: txImportStatus === "error" ? LOSS : txImportStatus === "done" ? GAIN : MUTED
+                            } }, txImportMsg))),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr auto", gap: 10, alignItems: "end" } },
+                        React.createElement(Field, { label: "\uD2F0\uCEE4" },
+                            React.createElement("input", { style: inputStyle, placeholder: "AAPL", value: txForm.ticker, onChange: (e) => setTxForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() })) })),
+                        React.createElement(Field, { label: "\uC218\uB7C9" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", min: "0", placeholder: "10 \uB610\uB294 0.5", value: txForm.qty, onChange: (e) => setTxForm((f) => ({ ...f, qty: e.target.value })) })),
+                        React.createElement(Field, { label: txForm.type === "sell" ? "매도 가격 ($)" : "개당 가격 ($)" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "150.00", value: txForm.priceUSD, onChange: (e) => setTxForm((f) => ({ ...f, priceUSD: e.target.value })) })),
+                        React.createElement(Field, { label: txForm.type === "sell" ? "매도 가격 (₩)" : "개당 가격 (₩)" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "205000", value: txForm.priceKRW, onChange: (e) => setTxForm((f) => ({ ...f, priceKRW: e.target.value })) })),
+                        React.createElement(Field, { label: txForm.type === "sell" ? "매도 날짜" : "구입 날짜" },
+                            React.createElement("input", { style: inputStyle, type: "date", value: txForm.date, onChange: (e) => setTxForm((f) => ({ ...f, date: e.target.value })) })),
+                        React.createElement(Btn, { onClick: addTransaction, style: txForm.type === "sell"
+                                ? { height: 34, background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010" }
+                                : { height: 34 } }, txForm.type === "sell" ? "매도 추가" : "매수 추가")),
+                    React.createElement("div", { style: { marginTop: 10 } },
+                        React.createElement(FxFillButton, { date: txForm.date, setForm: setTxForm, pairs: [["priceUSD", "priceKRW"]], onFx: recordFx }))),
+                React.createElement(Panel, { style: { padding: 0, marginBottom: 20, overflow: "hidden" } },
+                    React.createElement("div", { style: {
+                            padding: "14px 18px", borderBottom: `1px solid ${LINE}`,
+                            display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8
+                        } },
+                        React.createElement("div", { style: { fontWeight: 700 } }, "\uBCF4\uC720 \uC885\uBAA9"),
+                        holdings.length > 0 && (confirmClearTx ? (React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+                            React.createElement("span", { style: { fontSize: 12, color: LOSS } }, "\uBAA8\uB4E0 \uB9E4\uC218/\uB9E4\uB3C4 \uAC70\uB798\uB97C \uC0AD\uC81C\uD560\uAE4C\uC694? (\uBC30\uB2F9\uAE08\u00B7\uC6D0\uAE08 \uAE30\uB85D\uC740 \uC720\uC9C0)"),
+                            React.createElement(Btn, { onClick: clearAllTransactions, style: { background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010", padding: "4px 10px", fontSize: 12 } }, "\uD655\uC778, \uC0AD\uC81C"),
+                            React.createElement(Btn, { variant: "ghost", onClick: () => setConfirmClearTx(false), style: { padding: "4px 10px", fontSize: 12 } }, "\uCDE8\uC18C"))) : (React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                            React.createElement(Btn, { variant: "ghost", onClick: fetchAllCurrentPrices, disabled: fetchAllBusy, style: { padding: "4px 10px", fontSize: 12 } },
+                                fetchAllBusy ? React.createElement(Loader2, { size: 12, className: "spin" }) : React.createElement(Search, { size: 12 }),
+                                " \uC804\uCCB4 \uC870\uD68C"),
+                            React.createElement(Btn, { variant: "ghost", onClick: () => setConfirmClearTx(true), style: { padding: "4px 10px", fontSize: 12, color: LOSS } },
+                                React.createElement(Trash2, { size: 12 }),
+                                " \uAC70\uB798 \uB0B4\uC5ED \uC804\uCCB4 \uC0AD\uC81C"))))),
+                    holdings.length === 0 ? (React.createElement("div", { style: { padding: 24, textAlign: "center", color: MUTED, fontSize: 13 } }, "\uC544\uC9C1 \uAC70\uB798 \uB0B4\uC5ED\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uC704\uC5D0\uC11C \uCCAB \uAC70\uB798\uB97C \uCD94\uAC00\uD574\uBCF4\uC138\uC694.")) : (React.createElement("div", { style: { overflowX: "auto" } },
+                        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                            React.createElement("thead", null,
+                                React.createElement("tr", { style: { color: MUTED, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.5px" } },
+                                    React.createElement("th", { style: { textAlign: "left", padding: "8px 18px" } }, "\uC885\uBAA9"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uBCF4\uC720\uC218\uB7C9"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD3C9\uADE0\uB2E8\uAC00"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD22C\uC790\uC6D0\uAE08"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD604\uC7AC\uAC00"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD3C9\uAC00\uAE08\uC561"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uC2E4\uD604\uC190\uC775"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uBC30\uB2F9\uAE08(\uC138\uD6C4)"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uCD1D\uC190\uC775\uC561"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: "8px 18px" } }, "\uCD1D\uC190\uC775\uB960"))),
+                            React.createElement("tbody", null, holdings.map((h, idx) => {
+                                const key = cacheKey(h.ticker, todayStr());
+                                const isBusy = busyKeys[key];
+                                return (React.createElement(React.Fragment, { key: h.ticker },
+                                    React.createElement("tr", { className: "ledger-row", onClick: () => setExpandedTicker(expandedTicker === h.ticker ? null : h.ticker) },
+                                        React.createElement("td", { style: { padding: "10px 18px", display: "flex", alignItems: "center", gap: 8 } },
+                                            React.createElement("span", { style: { display: "flex", flexDirection: "column", gap: 1 } },
+                                                React.createElement("span", { onClick: (e) => { e.stopPropagation(); moveHolding(h.ticker, "up"); }, style: { fontSize: 9, lineHeight: 1, color: idx === 0 ? LINE : MUTED, cursor: idx === 0 ? "default" : "pointer" } }, "\u25B2"),
+                                                React.createElement("span", { onClick: (e) => { e.stopPropagation(); moveHolding(h.ticker, "down"); }, style: { fontSize: 9, lineHeight: 1, color: idx === holdings.length - 1 ? LINE : MUTED, cursor: idx === holdings.length - 1 ? "default" : "pointer" } }, "\u25BC")),
+                                            expandedTicker === h.ticker ? React.createElement(ChevronDown, { size: 14, color: MUTED }) : React.createElement(ChevronRight, { size: 14, color: MUTED }),
+                                            React.createElement("span", { style: { fontWeight: 700 }, className: "mono" }, h.ticker),
+                                            h.closed && (React.createElement("span", { style: { fontSize: 10, color: MUTED, border: `1px solid ${LINE}`, borderRadius: 4, padding: "1px 6px" } }, "\uCCAD\uC0B0"))),
+                                        React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 8 } }, h.closed ? "0" : fmtNum(h.qty, 4)),
+                                        React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.avgUSD, krw: h.avgKRW })),
+                                        React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.costUSD, krw: h.costKRW })),
+                                        React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : h.curPriceUSD !== null
+                                            ? React.createElement(DualLine, { usd: h.curPriceUSD, krw: h.curPriceKRW })
+                                            : (React.createElement("div", { style: { textAlign: "right" } },
+                                                React.createElement(Btn, { variant: "subtle", style: { padding: "3px 8px", fontSize: 11 }, onClick: (e) => { e.stopPropagation(); fetchPrice(h.ticker, todayStr()); } },
+                                                    isBusy ? React.createElement(Loader2, { size: 12, className: "spin" }) : React.createElement(Search, { size: 12 }),
+                                                    " \uC870\uD68C")))),
+                                        React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.curValueUSD, krw: h.curValueKRW, bold: true })),
+                                        React.createElement("td", { style: { padding: 8 } }, h.realizedUSD === 0 && h.realizedKRW === 0
+                                            ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014")
+                                            : React.createElement(DualLine, { usd: h.realizedUSD, krw: h.realizedKRW, color: h.realizedUSD >= 0 ? GAIN : LOSS })),
+                                        React.createElement("td", { style: { padding: 8 } }, h.dividendUSD === 0 && h.dividendKRW === 0
+                                            ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014")
+                                            : React.createElement(DualLine, { usd: h.dividendUSD, krw: h.dividendKRW, color: DIV_COLOR })),
+                                        React.createElement("td", { style: { padding: 8 } }, h.totalGainUSD === null
+                                            ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014")
+                                            : React.createElement(DualLine, { usd: h.totalGainUSD, krw: h.totalGainKRW, bold: true, color: h.totalGainUSD >= 0 ? GAIN : LOSS })),
+                                        React.createElement("td", { style: { padding: "8px 18px" } },
+                                            React.createElement("div", { style: { textAlign: "right" } },
+                                                React.createElement("div", { className: "mono", style: { fontWeight: 700, color: h.gainPctUSD === null ? MUTED : h.gainPctUSD >= 0 ? GAIN : LOSS } }, fmtPct(h.gainPctUSD)),
+                                                React.createElement("div", { className: "mono", style: { fontSize: 11, color: h.gainPctKRW === null ? MUTED : h.gainPctKRW >= 0 ? GAIN : LOSS } }, fmtPct(h.gainPctKRW))))),
+                                    expandedTicker === h.ticker && (React.createElement("tr", null,
+                                        React.createElement("td", { colSpan: 10, style: { padding: 0, background: PANEL_SOFT } },
+                                            React.createElement(TickerDetail, { ticker: h.ticker, transactions: transactions.filter((t) => t.ticker === h.ticker), dividends: dividends.filter((d) => d.ticker === h.ticker), onDeleteDividend: deleteDividend, onEditDividend: editDividend, series: tickerSeries(h.ticker), missingDates: missingDatesForTicker(h.ticker), busyKeys: busyKeys, onFetch: (d) => fetchPrice(h.ticker, d), onDeleteTx: deleteTransaction, onEditTx: editTransaction, chartCurrency: chartCurrency, setChartCurrency: setChartCurrency, checkpointDate: checkpointDate, setCheckpointDate: setCheckpointDate, onAddCheckpoint: addCheckpoint, manualEntry: manualEntry, setManualEntry: setManualEntry, onSaveManual: (d) => saveManualPrice(h.ticker, d), recordFx: recordFx }))))));
+                            })))))),
+                React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 } },
+                        React.createElement("div", { style: { fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
+                            React.createElement(TrendingUp, { size: 16, color: INK }),
+                            " \uCD1D \uC790\uC0B0 \uBCC0\uD654"),
+                        React.createElement("div", { style: { display: "flex", gap: 6 } },
+                            React.createElement(Btn, { variant: chartCurrency === "KRW" ? "primary" : "ghost", onClick: () => setChartCurrency("KRW"), style: { padding: "4px 10px", fontSize: 12 } }, "KRW"),
+                            React.createElement(Btn, { variant: chartCurrency === "USD" ? "primary" : "ghost", onClick: () => setChartCurrency("USD"), style: { padding: "4px 10px", fontSize: 12 } }, "USD"))),
+                    portfolioSeries.length < 1 ? (React.createElement("div", { style: { color: MUTED, fontSize: 13, padding: "12px 0" } }, "\uAC00\uACA9 \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uC885\uBAA9\uC744 \uD3BC\uCCD0\uC11C \uD604\uC7AC\uAC00\uB97C \uC870\uD68C\uD574\uC8FC\uC138\uC694.")) : (React.createElement("div", { style: { width: "100%" } }, (() => {
+                        const chartData = portfolioSeries.map((p) => ({
+                            date: p.date,
+                            평가금액: chartCurrency === "KRW" ? p.valKRW : p.valUSD,
+                            매입원가: chartCurrency === "KRW" ? p.costKRW : p.costUSD,
+                            누적원금: chartCurrency === "KRW" ? p.cumPrincipalKRW : p.cumPrincipalUSD,
+                            계좌현금: chartCurrency === "KRW" ? p.cashKRW : p.cashUSD,
+                            누적배당금: chartCurrency === "KRW" ? p.cumDividendKRW : p.cumDividendUSD,
+                            누적이자수입: chartCurrency === "KRW" ? p.cumInterestKRW : p.cumInterestUSD
+                        }));
+                        const fmtFull = chartCurrency === "KRW" ? fmtKRW : fmtUSD;
+                        return (React.createElement(SimpleLineChart, { data: chartData, height: 280, yTickFormat: (v) => chartCurrency === "KRW" ? "₩" + (v / 1e6).toFixed(1) + "M" : "$" + (v / 1e3).toFixed(1) + "K", tooltipFormat: fmtFull, lines: [
+                                { key: "평가금액", label: "평가금액", color: INK, width: 2.5 },
+                                { key: "매입원가", label: "매입원가", color: MUTED, width: 1.5, dashArray: "4 3" },
+                                { key: "누적원금", label: "누적원금", color: GAIN, width: 1.5, dashArray: "2 2" },
+                                { key: "계좌현금", label: "계좌현금", color: CASH_COLOR, width: 1.5, dashArray: "1 3" },
+                                { key: "누적배당금", label: "누적배당금", color: DIV_COLOR, width: 1, dashArray: "1 3", opacity: 0.6 },
+                                { key: "누적이자수입", label: "누적이자수입", color: INTEREST_COLOR, width: 1, dashArray: "1 3", opacity: 0.6 }
+                            ] }));
+                    })()))),
+                React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
+                    React.createElement("div", { style: { fontWeight: 700, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 } },
+                        React.createElement(Wallet, { size: 16, color: CASH_COLOR }),
+                        " \uACC4\uC88C \uD604\uAE08 \uAE30\uB85D"),
+                    React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 12 } }, "\uD574\uB2F9 \uB0A0\uC9DC\uC5D0 \uACC4\uC88C\uC5D0 \uC2E4\uC81C\uB85C \uB4E4\uC5B4\uC788\uB358 \uD604\uAE08 \uC794\uC561\uC744 \uC2A4\uB0C5\uC0F7\uC73C\uB85C \uAE30\uB85D\uD574\uC694. \uCD1D \uC790\uC0B0 \uADF8\uB798\uD504\uB294 \"\uC8FC\uC2DD \uD3C9\uAC00\uAE08\uC561 + \uC774 \uACC4\uC88C \uD604\uAE08\"\uC73C\uB85C \uACC4\uC0B0\uB418\uBA70, \uB2E4\uC74C \uAE30\uB85D\uC774 \uC788\uB294 \uB0A0\uC9DC \uC804\uAE4C\uC9C0\uB294 \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC785\uB825\uD55C \uAC12\uC774 \uADF8\uB300\uB85C \uC774\uC5B4\uC9D1\uB2C8\uB2E4(forward-fill)."),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end", marginBottom: 4 } },
+                        React.createElement(Field, { label: "\uAE30\uC900 \uB0A0\uC9DC" },
+                            React.createElement("input", { style: inputStyle, type: "date", value: cashForm.date, onChange: (e) => setCashForm((f) => ({ ...f, date: e.target.value })) })),
+                        React.createElement(Field, { label: "\uD604\uAE08 \uC794\uC561 ($) \u2014 \uC120\uD0DD" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: cashForm.amountUSD, onChange: (e) => setCashForm((f) => ({ ...f, amountUSD: e.target.value })) })),
+                        React.createElement(Field, { label: "\uD604\uAE08 \uC794\uC561 (\u20A9) \u2014 \uC120\uD0DD" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: cashForm.amountKRW, onChange: (e) => setCashForm((f) => ({ ...f, amountKRW: e.target.value })) })),
+                        React.createElement(Btn, { onClick: addCashBalance, style: { height: 34, background: CASH_COLOR, border: `1px solid ${CASH_COLOR}`, color: "#1C1530" } }, "\uCD94\uAC00")),
+                    React.createElement("div", { style: { marginBottom: 14 } },
+                        React.createElement(FxFillButton, { date: cashForm.date, setForm: setCashForm, pairs: [["amountUSD", "amountKRW"]], onFx: recordFx })),
+                    cashBalances.length > 0 && (React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
                         React.createElement("thead", null,
-                            React.createElement("tr", { style: { color: MUTED, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.5px" } },
-                                React.createElement("th", { style: { textAlign: "left", padding: "8px 18px" } }, "\uC885\uBAA9"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uBCF4\uC720\uC218\uB7C9"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD3C9\uADE0\uB2E8\uAC00"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD22C\uC790\uC6D0\uAE08"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD604\uC7AC\uAC00"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uD3C9\uAC00\uAE08\uC561"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uC2E4\uD604\uC190\uC775"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uBC30\uB2F9\uAE08(\uC138\uD6C4)"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px" } }, "\uCD1D\uC190\uC775\uC561"),
-                                React.createElement("th", { style: { textAlign: "right", padding: "8px 18px" } }, "\uCD1D\uC190\uC775\uB960"))),
-                        React.createElement("tbody", null, holdings.map((h, idx) => {
-                            const key = cacheKey(h.ticker, todayStr());
-                            const isBusy = busyKeys[key];
-                            return (React.createElement(React.Fragment, { key: h.ticker },
-                                React.createElement("tr", { className: "ledger-row", onClick: () => setExpandedTicker(expandedTicker === h.ticker ? null : h.ticker) },
-                                    React.createElement("td", { style: { padding: "10px 18px", display: "flex", alignItems: "center", gap: 8 } },
-                                        React.createElement("span", { style: { display: "flex", flexDirection: "column", gap: 1 } },
-                                            React.createElement("span", { onClick: (e) => { e.stopPropagation(); moveHolding(h.ticker, "up"); }, style: { fontSize: 9, lineHeight: 1, color: idx === 0 ? LINE : MUTED, cursor: idx === 0 ? "default" : "pointer" } }, "\u25B2"),
-                                            React.createElement("span", { onClick: (e) => { e.stopPropagation(); moveHolding(h.ticker, "down"); }, style: { fontSize: 9, lineHeight: 1, color: idx === holdings.length - 1 ? LINE : MUTED, cursor: idx === holdings.length - 1 ? "default" : "pointer" } }, "\u25BC")),
-                                        expandedTicker === h.ticker ? React.createElement(ChevronDown, { size: 14, color: MUTED }) : React.createElement(ChevronRight, { size: 14, color: MUTED }),
-                                        React.createElement("span", { style: { fontWeight: 700 }, className: "mono" }, h.ticker),
-                                        h.closed && (React.createElement("span", { style: { fontSize: 10, color: MUTED, border: `1px solid ${LINE}`, borderRadius: 4, padding: "1px 6px" } }, "\uCCAD\uC0B0"))),
-                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 8 } }, h.closed ? "0" : fmtNum(h.qty, 4)),
-                                    React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.avgUSD, krw: h.avgKRW })),
-                                    React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.costUSD, krw: h.costKRW })),
-                                    React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : h.curPriceUSD !== null
-                                        ? React.createElement(DualLine, { usd: h.curPriceUSD, krw: h.curPriceKRW })
-                                        : (React.createElement("div", { style: { textAlign: "right" } },
-                                            React.createElement(Btn, { variant: "subtle", style: { padding: "3px 8px", fontSize: 11 }, onClick: (e) => { e.stopPropagation(); fetchPrice(h.ticker, todayStr()); } },
-                                                isBusy ? React.createElement(Loader2, { size: 12, className: "spin" }) : React.createElement(Search, { size: 12 }),
-                                                " \uC870\uD68C")))),
-                                    React.createElement("td", { style: { padding: 8 } }, h.closed ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014") : React.createElement(DualLine, { usd: h.curValueUSD, krw: h.curValueKRW, bold: true })),
-                                    React.createElement("td", { style: { padding: 8 } }, h.realizedUSD === 0 && h.realizedKRW === 0
-                                        ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014")
-                                        : React.createElement(DualLine, { usd: h.realizedUSD, krw: h.realizedKRW, color: h.realizedUSD >= 0 ? GAIN : LOSS })),
-                                    React.createElement("td", { style: { padding: 8 } }, h.dividendUSD === 0 && h.dividendKRW === 0
-                                        ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014")
-                                        : React.createElement(DualLine, { usd: h.dividendUSD, krw: h.dividendKRW, color: DIV_COLOR })),
-                                    React.createElement("td", { style: { padding: 8 } }, h.totalGainUSD === null
-                                        ? React.createElement("div", { style: { textAlign: "right", color: MUTED } }, "\u2014")
-                                        : React.createElement(DualLine, { usd: h.totalGainUSD, krw: h.totalGainKRW, bold: true, color: h.totalGainUSD >= 0 ? GAIN : LOSS })),
-                                    React.createElement("td", { style: { padding: "8px 18px" } },
-                                        React.createElement("div", { style: { textAlign: "right" } },
-                                            React.createElement("div", { className: "mono", style: { fontWeight: 700, color: h.gainPctUSD === null ? MUTED : h.gainPctUSD >= 0 ? GAIN : LOSS } }, fmtPct(h.gainPctUSD)),
-                                            React.createElement("div", { className: "mono", style: { fontSize: 11, color: h.gainPctKRW === null ? MUTED : h.gainPctKRW >= 0 ? GAIN : LOSS } }, fmtPct(h.gainPctKRW))))),
-                                expandedTicker === h.ticker && (React.createElement("tr", null,
-                                    React.createElement("td", { colSpan: 10, style: { padding: 0, background: PANEL_SOFT } },
-                                        React.createElement(TickerDetail, { ticker: h.ticker, transactions: transactions.filter((t) => t.ticker === h.ticker), dividends: dividends.filter((d) => d.ticker === h.ticker), onDeleteDividend: deleteDividend, onEditDividend: editDividend, series: tickerSeries(h.ticker), missingDates: missingDatesForTicker(h.ticker), busyKeys: busyKeys, onFetch: (d) => fetchPrice(h.ticker, d), onDeleteTx: deleteTransaction, onEditTx: editTransaction, chartCurrency: chartCurrency, setChartCurrency: setChartCurrency, checkpointDate: checkpointDate, setCheckpointDate: setCheckpointDate, onAddCheckpoint: addCheckpoint, manualEntry: manualEntry, setManualEntry: setManualEntry, onSaveManual: (d) => saveManualPrice(h.ticker, d), recordFx: recordFx }))))));
-                        })))))),
-            React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 } },
-                    React.createElement("div", { style: { fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
-                        React.createElement(TrendingUp, { size: 16, color: INK }),
-                        " \uCD1D \uC790\uC0B0 \uBCC0\uD654"),
-                    React.createElement("div", { style: { display: "flex", gap: 6 } },
-                        React.createElement(Btn, { variant: chartCurrency === "KRW" ? "primary" : "ghost", onClick: () => setChartCurrency("KRW"), style: { padding: "4px 10px", fontSize: 12 } }, "KRW"),
-                        React.createElement(Btn, { variant: chartCurrency === "USD" ? "primary" : "ghost", onClick: () => setChartCurrency("USD"), style: { padding: "4px 10px", fontSize: 12 } }, "USD"))),
-                portfolioSeries.length < 1 ? (React.createElement("div", { style: { color: MUTED, fontSize: 13, padding: "12px 0" } }, "\uAC00\uACA9 \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uC885\uBAA9\uC744 \uD3BC\uCCD0\uC11C \uD604\uC7AC\uAC00\uB97C \uC870\uD68C\uD574\uC8FC\uC138\uC694.")) : (React.createElement("div", { style: { width: "100%" } }, (() => {
-                    const chartData = portfolioSeries.map((p) => ({
-                        date: p.date,
-                        평가금액: chartCurrency === "KRW" ? p.valKRW : p.valUSD,
-                        매입원가: chartCurrency === "KRW" ? p.costKRW : p.costUSD,
-                        누적원금: chartCurrency === "KRW" ? p.cumPrincipalKRW : p.cumPrincipalUSD,
-                        계좌현금: chartCurrency === "KRW" ? p.cashKRW : p.cashUSD,
-                        누적배당금: chartCurrency === "KRW" ? p.cumDividendKRW : p.cumDividendUSD,
-                        누적이자수입: chartCurrency === "KRW" ? p.cumInterestKRW : p.cumInterestUSD
-                    }));
-                    const fmtFull = chartCurrency === "KRW" ? fmtKRW : fmtUSD;
-                    return (React.createElement(SimpleLineChart, { data: chartData, height: 280, yTickFormat: (v) => chartCurrency === "KRW" ? "₩" + (v / 1e6).toFixed(1) + "M" : "$" + (v / 1e3).toFixed(1) + "K", tooltipFormat: fmtFull, lines: [
-                            { key: "평가금액", label: "평가금액", color: INK, width: 2.5 },
-                            { key: "매입원가", label: "매입원가", color: MUTED, width: 1.5, dashArray: "4 3" },
-                            { key: "누적원금", label: "누적원금", color: GAIN, width: 1.5, dashArray: "2 2" },
-                            { key: "계좌현금", label: "계좌현금", color: CASH_COLOR, width: 1.5, dashArray: "1 3" },
-                            { key: "누적배당금", label: "누적배당금", color: DIV_COLOR, width: 1, dashArray: "1 3", opacity: 0.6 },
-                            { key: "누적이자수입", label: "누적이자수입", color: INTEREST_COLOR, width: 1, dashArray: "1 3", opacity: 0.6 }
-                        ] }));
-                })()))),
-            React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
-                React.createElement("div", { style: { fontWeight: 700, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 } },
-                    React.createElement(Wallet, { size: 16, color: CASH_COLOR }),
-                    " \uACC4\uC88C \uD604\uAE08 \uAE30\uB85D"),
-                React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 12 } }, "\uD574\uB2F9 \uB0A0\uC9DC\uC5D0 \uACC4\uC88C\uC5D0 \uC2E4\uC81C\uB85C \uB4E4\uC5B4\uC788\uB358 \uD604\uAE08 \uC794\uC561\uC744 \uC2A4\uB0C5\uC0F7\uC73C\uB85C \uAE30\uB85D\uD574\uC694. \uCD1D \uC790\uC0B0 \uADF8\uB798\uD504\uB294 \"\uC8FC\uC2DD \uD3C9\uAC00\uAE08\uC561 + \uC774 \uACC4\uC88C \uD604\uAE08\"\uC73C\uB85C \uACC4\uC0B0\uB418\uBA70, \uB2E4\uC74C \uAE30\uB85D\uC774 \uC788\uB294 \uB0A0\uC9DC \uC804\uAE4C\uC9C0\uB294 \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC785\uB825\uD55C \uAC12\uC774 \uADF8\uB300\uB85C \uC774\uC5B4\uC9D1\uB2C8\uB2E4(forward-fill)."),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end", marginBottom: 4 } },
-                    React.createElement(Field, { label: "\uAE30\uC900 \uB0A0\uC9DC" },
-                        React.createElement("input", { style: inputStyle, type: "date", value: cashForm.date, onChange: (e) => setCashForm((f) => ({ ...f, date: e.target.value })) })),
-                    React.createElement(Field, { label: "\uD604\uAE08 \uC794\uC561 ($) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: cashForm.amountUSD, onChange: (e) => setCashForm((f) => ({ ...f, amountUSD: e.target.value })) })),
-                    React.createElement(Field, { label: "\uD604\uAE08 \uC794\uC561 (\u20A9) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: cashForm.amountKRW, onChange: (e) => setCashForm((f) => ({ ...f, amountKRW: e.target.value })) })),
-                    React.createElement(Btn, { onClick: addCashBalance, style: { height: 34, background: CASH_COLOR, border: `1px solid ${CASH_COLOR}`, color: "#1C1530" } }, "\uCD94\uAC00")),
-                React.createElement("div", { style: { marginBottom: 14 } },
-                    React.createElement(FxFillButton, { date: cashForm.date, setForm: setCashForm, pairs: [["amountUSD", "amountKRW"]], onFx: recordFx })),
-                cashBalances.length > 0 && (React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
-                    React.createElement("thead", null,
-                        React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
-                            React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
-                            React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "$ \uC794\uC561"),
-                            React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\u20A9 \uC794\uC561"),
-                            React.createElement("th", { style: { padding: 6, width: 50 } }))),
-                    React.createElement("tbody", null, cashBalances.map((c) => {
-                        if (editingCashId === c.id) {
+                            React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
+                                React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "$ \uC794\uC561"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\u20A9 \uC794\uC561"),
+                                React.createElement("th", { style: { padding: 6, width: 50 } }))),
+                        React.createElement("tbody", null, cashBalances.map((c) => {
+                            if (editingCashId === c.id) {
+                                return (React.createElement("tr", { key: c.id, className: "ledger-row" },
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 130, marginBottom: 4 }, type: "date", value: editCashForm.date, onChange: (e) => setEditCashForm((f) => ({ ...f, date: e.target.value })) }),
+                                        React.createElement(FxFillButton, { date: editCashForm.date, setForm: setEditCashForm, pairs: [["amountUSD", "amountKRW"]], label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editCashForm.amountUSD, onChange: (e) => setEditCashForm((f) => ({ ...f, amountUSD: e.target.value })) })),
+                                    React.createElement("td", { style: { padding: 6 } },
+                                        React.createElement("input", { style: { ...inputStyle, width: 100, textAlign: "right" }, type: "number", step: "any", value: editCashForm.amountKRW, onChange: (e) => setEditCashForm((f) => ({ ...f, amountKRW: e.target.value })) })),
+                                    React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                        React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditCash }),
+                                        React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingCashId(null) }))));
+                            }
                             return (React.createElement("tr", { key: c.id, className: "ledger-row" },
-                                React.createElement("td", { style: { padding: 6 } },
-                                    React.createElement("input", { style: { ...inputStyle, width: 130, marginBottom: 4 }, type: "date", value: editCashForm.date, onChange: (e) => setEditCashForm((f) => ({ ...f, date: e.target.value })) }),
-                                    React.createElement(FxFillButton, { date: editCashForm.date, setForm: setEditCashForm, pairs: [["amountUSD", "amountKRW"]], label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
-                                React.createElement("td", { style: { padding: 6 } },
-                                    React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editCashForm.amountUSD, onChange: (e) => setEditCashForm((f) => ({ ...f, amountUSD: e.target.value })) })),
-                                React.createElement("td", { style: { padding: 6 } },
-                                    React.createElement("input", { style: { ...inputStyle, width: 100, textAlign: "right" }, type: "number", step: "any", value: editCashForm.amountKRW, onChange: (e) => setEditCashForm((f) => ({ ...f, amountKRW: e.target.value })) })),
+                                React.createElement("td", { className: "mono", style: { padding: 6 } }, c.date),
+                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, c.amountUSD ? fmtUSD(c.amountUSD) : "—"),
+                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, c.amountKRW ? fmtKRW(c.amountKRW) : "—"),
                                 React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                    React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditCash }),
-                                    React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingCashId(null) }))));
-                        }
-                        return (React.createElement("tr", { key: c.id, className: "ledger-row" },
-                            React.createElement("td", { className: "mono", style: { padding: 6 } }, c.date),
-                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, c.amountUSD ? fmtUSD(c.amountUSD) : "—"),
-                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, c.amountKRW ? fmtKRW(c.amountKRW) : "—"),
-                            React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditCash(c) }),
-                                React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteCashBalance(c.id) }))));
-                    }))))),
-            React.createElement(Panel, { style: { padding: 18 } },
-                React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
-                    React.createElement(PiggyBank, { size: 16, color: INK }),
-                    " \uD22C\uC785 \uC6D0\uAE08 \uAE30\uB85D"),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end", marginBottom: 14 } },
-                    React.createElement(Field, { label: "\uC785\uAE08 \uB0A0\uC9DC" },
-                        React.createElement("input", { style: inputStyle, type: "date", value: principalForm.date, onChange: (e) => setPrincipalForm((f) => ({ ...f, date: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC785\uAE08\uC561 ($) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: principalForm.amountUSD, onChange: (e) => setPrincipalForm((f) => ({ ...f, amountUSD: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC785\uAE08\uC561 (\u20A9) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: principalForm.amountKRW, onChange: (e) => setPrincipalForm((f) => ({ ...f, amountKRW: e.target.value })) })),
-                    React.createElement(Btn, { onClick: () => {
-                            const amountUSD = parseFloat(principalForm.amountUSD) || 0;
-                            const amountKRW = parseFloat(principalForm.amountKRW) || 0;
-                            if (!principalForm.date || (!amountUSD && !amountKRW)) {
-                                setErrorMsg("날짜와 금액을 입력해주세요.");
-                                return;
-                            }
-                            setPrincipal((prev) => [...prev, { id: uid(), date: principalForm.date, amountUSD, amountKRW }].sort((a, b) => a.date.localeCompare(b.date)));
-                            setPrincipalForm({ date: todayStr(), amountUSD: "", amountKRW: "" });
-                            setErrorMsg("");
-                        }, style: { height: 34 } }, "\uCD94\uAC00")),
-                React.createElement("div", { style: { marginBottom: 14 } },
-                    React.createElement(FxFillButton, { date: principalForm.date, setForm: setPrincipalForm, pairs: [["amountUSD", "amountKRW"]], onFx: recordFx })),
-                principal.length > 0 && (React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                                    React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditCash(c) }),
+                                    React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteCashBalance(c.id) }))));
+                        }))))),
+                React.createElement(Panel, { style: { padding: 18 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 8 } },
+                        React.createElement("div", { style: { fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
+                            React.createElement(PiggyBank, { size: 16, color: INK }),
+                            " \uD22C\uC785 \uC6D0\uAE08 \uAE30\uB85D"),
+                        React.createElement("div", { style: { display: "flex", gap: 6 } },
+                            React.createElement(Btn, { variant: principalForm.type === "deposit" ? "primary" : "ghost", onClick: () => setPrincipalForm((f) => ({ ...f, type: "deposit" })), style: { padding: "5px 14px" } }, "\uC785\uAE08"),
+                            React.createElement(Btn, { variant: principalForm.type === "withdrawal" ? "primary" : "ghost", onClick: () => setPrincipalForm((f) => ({ ...f, type: "withdrawal" })), style: principalForm.type === "withdrawal" ? { padding: "5px 14px", background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010" } : { padding: "5px 14px" } }, "\uCD9C\uAE08"))),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 10, alignItems: "end", marginBottom: 14 } },
+                        React.createElement(Field, { label: principalForm.type === "withdrawal" ? "출금 날짜" : "입금 날짜" },
+                            React.createElement("input", { style: inputStyle, type: "date", value: principalForm.date, onChange: (e) => setPrincipalForm((f) => ({ ...f, date: e.target.value })) })),
+                        React.createElement(Field, { label: principalForm.type === "withdrawal" ? "출금액 ($) — 선택" : "입금액 ($) — 선택" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: principalForm.amountUSD, onChange: (e) => setPrincipalForm((f) => ({ ...f, amountUSD: e.target.value })) })),
+                        React.createElement(Field, { label: principalForm.type === "withdrawal" ? "출금액 (₩) — 선택" : "입금액 (₩) — 선택" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: principalForm.amountKRW, onChange: (e) => setPrincipalForm((f) => ({ ...f, amountKRW: e.target.value })) })),
+                        React.createElement(Btn, { onClick: () => {
+                                const type = principalForm.type === "withdrawal" ? "withdrawal" : "deposit";
+                                const amountUSD = parseFloat(principalForm.amountUSD) || 0;
+                                const amountKRW = parseFloat(principalForm.amountKRW) || 0;
+                                if (!principalForm.date || (!amountUSD && !amountKRW)) {
+                                    setErrorMsg("날짜와 금액을 입력해주세요.");
+                                    return;
+                                }
+                                setPrincipal((prev) => [...prev, { id: uid(), type, date: principalForm.date, amountUSD, amountKRW }].sort((a, b) => a.date.localeCompare(b.date)));
+                                setPrincipalForm({ type, date: todayStr(), amountUSD: "", amountKRW: "" });
+                                setErrorMsg("");
+                            }, style: principalForm.type === "withdrawal" ? { height: 34, background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010" } : { height: 34 } }, principalForm.type === "withdrawal" ? "출금 추가" : "입금 추가")),
+                    React.createElement("div", { style: { marginBottom: 14 } },
+                        React.createElement(FxFillButton, { date: principalForm.date, setForm: setPrincipalForm, pairs: [["amountUSD", "amountKRW"]], onFx: recordFx })),
+                    principal.length > 0 && (React.createElement("div", { style: { overflowX: "auto" } },
+                        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                            React.createElement("thead", null,
+                                React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
+                                    React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uAD6C\uBD84"),
+                                    React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "$ \uAE08\uC561"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\u20A9 \uAE08\uC561"),
+                                    React.createElement("th", { style: { padding: 6, width: 50 } }))),
+                            React.createElement("tbody", null, principal.map((p) => {
+                                if (editingPrincipalId === p.id) {
+                                    return (React.createElement("tr", { key: p.id, className: "ledger-row" },
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("div", { style: { display: "flex", gap: 4 } },
+                                                React.createElement(Btn, { variant: editPrincipalForm.type === "deposit" ? "primary" : "ghost", style: { padding: "2px 6px", fontSize: 10 }, onClick: () => setEditPrincipalForm((f) => ({ ...f, type: "deposit" })) }, "\uC785\uAE08"),
+                                                React.createElement(Btn, { variant: editPrincipalForm.type === "withdrawal" ? "primary" : "ghost", style: editPrincipalForm.type === "withdrawal"
+                                                        ? { padding: "2px 6px", fontSize: 10, background: LOSS, border: `1px solid ${LOSS}`, color: "#1A1010" }
+                                                        : { padding: "2px 6px", fontSize: 10 }, onClick: () => setEditPrincipalForm((f) => ({ ...f, type: "withdrawal" })) }, "\uCD9C\uAE08"))),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 130, marginBottom: 4 }, type: "date", value: editPrincipalForm.date, onChange: (e) => setEditPrincipalForm((f) => ({ ...f, date: e.target.value })) }),
+                                            React.createElement(FxFillButton, { date: editPrincipalForm.date, setForm: setEditPrincipalForm, pairs: [["amountUSD", "amountKRW"]], label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editPrincipalForm.amountUSD, onChange: (e) => setEditPrincipalForm((f) => ({ ...f, amountUSD: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 100, textAlign: "right" }, type: "number", step: "any", value: editPrincipalForm.amountKRW, onChange: (e) => setEditPrincipalForm((f) => ({ ...f, amountKRW: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                            React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditPrincipal }),
+                                            React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingPrincipalId(null) }))));
+                                }
+                                const isWithdrawal = p.type === "withdrawal";
+                                return (React.createElement("tr", { key: p.id, className: "ledger-row" },
+                                    React.createElement("td", { className: "mono", style: { padding: 6, fontWeight: 700, color: isWithdrawal ? LOSS : GAIN } }, isWithdrawal ? "출금" : "입금"),
+                                    React.createElement("td", { className: "mono", style: { padding: 6 } }, p.date),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, p.amountUSD ? fmtUSD(p.amountUSD) : "—"),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, p.amountKRW ? fmtKRW(p.amountKRW) : "—"),
+                                    React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                        React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditPrincipal(p) }),
+                                        React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => setPrincipal((prev) => prev.filter((x) => x.id !== p.id)) }))));
+                            })))))),
+                React.createElement(Panel, { style: { padding: 18, marginTop: 20 } },
+                    React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
+                        React.createElement(Coins, { size: 16, color: DIV_COLOR }),
+                        " \uBC30\uB2F9\uAE08 \uAE30\uB85D"),
+                    React.createElement("div", { style: {
+                            border: `1px dashed ${LINE}`, borderRadius: 6, padding: 14, marginBottom: 14,
+                            display: "flex", flexDirection: "column", gap: 10
+                        } },
+                        React.createElement("div", { style: { fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
+                            React.createElement(Upload, { size: 14, color: DIV_COLOR }),
+                            " \uC5D1\uC140\uB85C \uD55C \uBC88\uC5D0 \uAC00\uC838\uC624\uAE30"),
+                        React.createElement("div", { style: { fontSize: 11, color: MUTED } }, "1) \uC544\uB798\uC5D0\uC11C \uC5D1\uC140 \uD30C\uC77C(.xlsx)\uC744 \uC120\uD0DD\uD558\uACE0 2) \"\uAC00\uC838\uC624\uAE30 \uC2E4\uD589\" \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694. \"\uC885\uBAA9\", \"\uB0A0\uC9DC\", \"\uC138\uC804 ($/\u20A9)\", \"\uC138\uD6C4 ($/\u20A9)\" \uC5F4\uC774 \uC788\uC73C\uBA74 \uC790\uB3D9\uC73C\uB85C \uC778\uC2DD\uD574\uC694. \uC774\uBBF8 \uB4F1\uB85D\uB41C \uD56D\uBAA9(\uC885\uBAA9\u00B7\uB0A0\uC9DC\u00B7\uC138\uD6C4 \uAE08\uC561\uC774 \uBAA8\uB450 \uAC19\uC740 \uACBD\uC6B0)\uC740 \uC911\uBCF5\uC73C\uB85C \uCD94\uAC00\uB418\uC9C0 \uC54A\uC544\uC694."),
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+                            React.createElement("input", { ref: excelFileInputRef, type: "file", accept: ".xlsx,.xls", style: { fontSize: 12, color: TEXT, maxWidth: 260 }, onChange: (e) => {
+                                    const file = e.target.files && e.target.files[0];
+                                    setPendingFile(file || null);
+                                    setImportStatus("idle");
+                                    setImportMsg(file ? `선택됨: ${file.name} — "가져오기 실행"을 눌러주세요.` : "");
+                                } }),
+                            React.createElement(Btn, { onClick: () => pendingFile && handleExcelImport(pendingFile), disabled: !pendingFile || importStatus === "busy", style: { background: DIV_COLOR, border: `1px solid ${DIV_COLOR}`, color: "#0E1A24" } },
+                                importStatus === "busy" ? React.createElement(Loader2, { size: 13, className: "spin" }) : React.createElement(Upload, { size: 13 }),
+                                " \uAC00\uC838\uC624\uAE30 \uC2E4\uD589")),
+                        importMsg && (React.createElement("div", { style: {
+                                fontSize: 12, padding: "8px 10px", borderRadius: 5,
+                                background: importStatus === "error" ? "#2A1B1B" : importStatus === "done" ? "#16241F" : PANEL_SOFT,
+                                border: `1px solid ${importStatus === "error" ? LOSS + "55" : importStatus === "done" ? GAIN + "55" : LINE}`,
+                                color: importStatus === "error" ? LOSS : importStatus === "done" ? GAIN : MUTED
+                            } }, importMsg))),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, marginBottom: 10 } },
+                        React.createElement(Field, { label: "\uC885\uBAA9" },
+                            React.createElement("input", { style: inputStyle, placeholder: "AAPL", value: dividendForm.ticker, onChange: (e) => setDividendForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() })) })),
+                        React.createElement(Field, { label: "\uC9C0\uAE09 \uB0A0\uC9DC" },
+                            React.createElement("input", { style: inputStyle, type: "date", value: dividendForm.date, onChange: (e) => setDividendForm((f) => ({ ...f, date: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uC804 ($) \u2014 \uC120\uD0DD" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.preTaxUSD, onChange: (e) => setDividendForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uC804 (\u20A9) \u2014 \uC120\uD0DD" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.preTaxKRW, onChange: (e) => setDividendForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uD6C4 ($)" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.postTaxUSD, onChange: (e) => setDividendForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uD6C4 (\u20A9)" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.postTaxKRW, onChange: (e) => setDividendForm((f) => ({ ...f, postTaxKRW: e.target.value })) }))),
+                    React.createElement("div", { style: { marginBottom: 4, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+                        React.createElement(Btn, { onClick: addDividend, style: { height: 34, background: DIV_COLOR, border: `1px solid ${DIV_COLOR}`, color: "#0E1A24" } }, "\uCD94\uAC00"),
+                        React.createElement(FxFillButton, { date: dividendForm.date, setForm: setDividendForm, onFx: recordFx })),
+                    React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 14 } }, "\uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD588\uB2E4\uBA74 \uC870\uD68C \uBC84\uD2BC\uC73C\uB85C \uB098\uBA38\uC9C0\uB97C \uC790\uB3D9\uC73C\uB85C \uCC44\uC6B8 \uC218 \uC788\uC5B4\uC694 \u00B7 \uC138\uC804\uC744 \uBE44\uC6CC\uB450\uBA74 \uC138\uD6C4\uC640 \uB3D9\uC77C\uD55C \uAC83\uC73C\uB85C \uCC98\uB9AC\uB3FC\uC694"),
+                    dividends.length > 0 && (React.createElement("div", { style: { overflowX: "auto" } },
+                        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                            React.createElement("thead", null,
+                                React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
+                                    React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uC885\uBAA9"),
+                                    React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 $"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \u20A9"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 $"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 \u20A9"),
+                                    React.createElement("th", { style: { padding: 6, width: 50 } }))),
+                            React.createElement("tbody", null, [...dividends].sort((a, b) => a.date.localeCompare(b.date)).map((d) => {
+                                if (editingDividendId === d.id) {
+                                    return (React.createElement("tr", { key: d.id, className: "ledger-row" },
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 70 }, value: editDividendForm.ticker, onChange: (e) => setEditDividendForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 125, marginBottom: 4 }, type: "date", value: editDividendForm.date, onChange: (e) => setEditDividendForm((f) => ({ ...f, date: e.target.value })) }),
+                                            React.createElement(FxFillButton, { date: editDividendForm.date, setForm: setEditDividendForm, label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.preTaxUSD, onChange: (e) => setEditDividendForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.preTaxKRW, onChange: (e) => setEditDividendForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.postTaxUSD, onChange: (e) => setEditDividendForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.postTaxKRW, onChange: (e) => setEditDividendForm((f) => ({ ...f, postTaxKRW: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                            React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditDividend }),
+                                            React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingDividendId(null) }))));
+                                }
+                                return (React.createElement("tr", { key: d.id, className: "ledger-row" },
+                                    React.createElement("td", { className: "mono", style: { padding: 6, fontWeight: 700 } }, d.ticker),
+                                    React.createElement("td", { className: "mono", style: { padding: 6 } }, d.date),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxUSD ? fmtUSD(d.preTaxUSD) : "—"),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxKRW ? fmtKRW(d.preTaxKRW) : "—"),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: DIV_COLOR } }, d.postTaxUSD ? fmtUSD(d.postTaxUSD) : "—"),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: DIV_COLOR } }, d.postTaxKRW ? fmtKRW(d.postTaxKRW) : "—"),
+                                    React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                        React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditDividend(d) }),
+                                        React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteDividend(d.id) }))));
+                            })))))),
+                React.createElement(Panel, { style: { padding: 18, marginTop: 20 } },
+                    React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
+                        React.createElement(Coins, { size: 16, color: INTEREST_COLOR }),
+                        " \uACC4\uC88C \uC774\uC790 \uC218\uC785"),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, marginBottom: 10 } },
+                        React.createElement(Field, { label: "\uC9C0\uAE09 \uB0A0\uC9DC" },
+                            React.createElement("input", { style: inputStyle, type: "date", value: interestForm.date, onChange: (e) => setInterestForm((f) => ({ ...f, date: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uC804 ($) \u2014 \uC120\uD0DD" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.preTaxUSD, onChange: (e) => setInterestForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uC804 (\u20A9) \u2014 \uC120\uD0DD" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.preTaxKRW, onChange: (e) => setInterestForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uD6C4 ($)" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.postTaxUSD, onChange: (e) => setInterestForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
+                        React.createElement(Field, { label: "\uC138\uD6C4 (\u20A9)" },
+                            React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.postTaxKRW, onChange: (e) => setInterestForm((f) => ({ ...f, postTaxKRW: e.target.value })) }))),
+                    React.createElement("div", { style: { marginBottom: 4, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+                        React.createElement(Btn, { onClick: addInterest, style: { height: 34, background: INTEREST_COLOR, border: `1px solid ${INTEREST_COLOR}`, color: "#0E1A1A" } }, "\uCD94\uAC00"),
+                        React.createElement(FxFillButton, { date: interestForm.date, setForm: setInterestForm, onFx: recordFx })),
+                    React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 14 } }, "\uC608\uAE08\u00B7MMF\u00B7CMA \uC774\uC790\uCC98\uB7FC \uD2B9\uC815 \uC885\uBAA9\uC5D0 \uC18D\uD558\uC9C0 \uC54A\uB294 \uACC4\uC88C \uB2E8\uC704 \uC774\uC790 \uC218\uC785\uC744 \uAE30\uB85D\uD574\uC694. \uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD588\uB2E4\uBA74 \uC870\uD68C \uBC84\uD2BC\uC73C\uB85C \uB098\uBA38\uC9C0\uB97C \uC790\uB3D9\uC73C\uB85C \uCC44\uC6B8 \uC218 \uC788\uACE0, \uC138\uC804\uC744 \uBE44\uC6CC\uB450\uBA74 \uC138\uD6C4\uC640 \uB3D9\uC77C\uD55C \uAC83\uC73C\uB85C \uCC98\uB9AC\uB3FC\uC694."),
+                    interestIncome.length > 0 && (React.createElement("div", { style: { overflowX: "auto" } },
+                        React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                            React.createElement("thead", null,
+                                React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
+                                    React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 $"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \u20A9"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 $"),
+                                    React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 \u20A9"),
+                                    React.createElement("th", { style: { padding: 6, width: 50 } }))),
+                            React.createElement("tbody", null, [...interestIncome].sort((a, b) => a.date.localeCompare(b.date)).map((d) => {
+                                if (editingInterestId === d.id) {
+                                    return (React.createElement("tr", { key: d.id, className: "ledger-row" },
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 125, marginBottom: 4 }, type: "date", value: editInterestForm.date, onChange: (e) => setEditInterestForm((f) => ({ ...f, date: e.target.value })) }),
+                                            React.createElement(FxFillButton, { date: editInterestForm.date, setForm: setEditInterestForm, label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.preTaxUSD, onChange: (e) => setEditInterestForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.preTaxKRW, onChange: (e) => setEditInterestForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.postTaxUSD, onChange: (e) => setEditInterestForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6 } },
+                                            React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.postTaxKRW, onChange: (e) => setEditInterestForm((f) => ({ ...f, postTaxKRW: e.target.value })) })),
+                                        React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                            React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditInterest }),
+                                            React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingInterestId(null) }))));
+                                }
+                                return (React.createElement("tr", { key: d.id, className: "ledger-row" },
+                                    React.createElement("td", { className: "mono", style: { padding: 6 } }, d.date),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxUSD ? fmtUSD(d.preTaxUSD) : "—"),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxKRW ? fmtKRW(d.preTaxKRW) : "—"),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: INTEREST_COLOR } }, d.postTaxUSD ? fmtUSD(d.postTaxUSD) : "—"),
+                                    React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: INTEREST_COLOR } }, d.postTaxKRW ? fmtKRW(d.postTaxKRW) : "—"),
+                                    React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
+                                        React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditInterest(d) }),
+                                        React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteInterest(d.id) }))));
+                            })))))),
+                React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 18, lineHeight: 1.6 } }, "\uAC00\uACA9 \uB370\uC774\uD130\uB294 \uC9C1\uC811 \uC785\uB825\uD558\uAC70\uB098, AI \uC6F9 \uAC80\uC0C9\uC744 \uD1B5\uD574 \uC870\uD68C\uD55C \uC885\uAC00 \uAE30\uC900\uC785\uB2C8\uB2E4. \uC2E4\uC2DC\uAC04 \uC2DC\uC138\uC640\uB294 \uCC28\uC774\uAC00 \uC788\uC744 \uC218 \uC788\uC73C\uBA70, \uADF8\uB798\uD504\uC758 \uAC01 \uC9C0\uC810\uC740 \uAC70\uB798\uC77C \uBC0F \uC870\uD68C\uD55C \uB0A0\uC9DC(\uCCB4\uD06C\uD3EC\uC778\uD2B8)\uB97C \uAE30\uC900\uC73C\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uB354 \uCD18\uCD18\uD55C \uADF8\uB798\uD504\uB97C \uC6D0\uD558\uC2DC\uBA74 \uC885\uBAA9\uC744 \uD3BC\uCCD0 \uC6D0\uD558\uB294 \uB0A0\uC9DC\uB97C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uB85C \uCD94\uAC00\uD574\uBCF4\uC138\uC694. \uB9E4\uB3C4 \uC2DC \uD3C9\uADE0\uB2E8\uAC00\uBC95\uC73C\uB85C \uC2E4\uD604\uC190\uC775\uC744 \uACC4\uC0B0\uD558\uBA70, \"\uCD1D\uC190\uC775\uB960\"\uC740 \uC2E4\uD604\uC190\uC775, \uBBF8\uC2E4\uD604\uC190\uC775, \uC138\uD6C4 \uBC30\uB2F9\uAE08\uC744 \uBAA8\uB450 \uD569\uC0B0\uD574 \uADF8 \uC885\uBAA9\uC5D0 \uD22C\uC785\uD55C \uCD1D \uB9E4\uC785\uAE08\uC561 \uB300\uBE44 \uBE44\uC728\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uC6D0\uAE08 \uB300\uBE44 \uC218\uC775\uB960\uC5D0\uB3C4 \uC138\uD6C4 \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785 \uC218\uB839\uC561\uC774 \uD3EC\uD568\uB418\uC5B4 \uACC4\uC0B0\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785\uC740 \uC138\uC804/\uC138\uD6C4 \uAE08\uC561\uC744 \uD568\uAED8 \uAE30\uB85D\uD560 \uC218 \uC788\uACE0, \uC790\uC0B0 \uBCC0\uD654 \uCD94\uC801(\uADF8\uB798\uD504\u00B7\uC218\uC775\uB960 \uACC4\uC0B0)\uC5D0\uB294 \uC2E4\uC81C\uB85C \uC190\uC5D0 \uB4E4\uC5B4\uC628 \uC138\uD6C4 \uAE08\uC561\uB9CC \uC0AC\uC6A9\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785\u00B7\uC6D0\uAE08\u00B7\uB9E4\uC218/\uB9E4\uB3C4\u00B7\uACC4\uC88C \uD604\uAE08 \uC785\uB825 \uC2DC \"\uD658\uC728 \uC870\uD68C\" \uBC84\uD2BC\uC744 \uB204\uB974\uBA74 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uC744 \uC870\uD68C\uD574 \uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD55C \uAE08\uC561\uC744 \uC790\uB3D9\uC73C\uB85C \uCC44\uC6CC\uC90D\uB2C8\uB2E4 (\uC591\uCABD\uC744 \uC774\uBBF8 \uC785\uB825\uD588\uB2E4\uBA74 \uADF8\uB300\uB85C \uB461\uB2C8\uB2E4). \uCD1D \uC790\uC0B0 \uADF8\uB798\uD504\uC758 \uAD75\uC740 \"\uD3C9\uAC00\uAE08\uC561\" \uC120\uC740 \uBCF4\uC720 \uC911\uC778 \uAD6D\uB0B4\u00B7\uD574\uC678 \uC8FC\uC2DD\uC744 \uAC01 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uD569\uC0B0\uD55C \uAC12\uC774\uACE0, \"\uACC4\uC88C\uD604\uAE08\"\u00B7\"\uB204\uC801\uBC30\uB2F9\uAE08\"\u00B7\"\uB204\uC801\uC774\uC790\uC218\uC785\" \uC120\uB3C4 \uD55C\uCABD \uD1B5\uD654\uB9CC \uAE30\uB85D\uB41C \uACBD\uC6B0 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uCC44\uC6CC \uB123\uC2B5\uB2C8\uB2E4(\uB2E8, \uC9C0\uAE08\uAE4C\uC9C0 \uD55C \uBC88\uC774\uB77C\uB3C4 \uC870\uD68C\uB41C \uD658\uC728\uC774 \uC788\uC5B4\uC57C \uD658\uC0B0\uC774 \uAC00\uB2A5\uD574\uC694). \uACC4\uC88C \uD604\uAE08\uC740 \"\uACC4\uC88C \uD604\uAE08 \uAE30\uB85D\"\uC5D0 \uC785\uB825\uD55C \uC2A4\uB0C5\uC0F7\uC744 \uAE30\uC900\uC73C\uB85C \uB2E4\uC74C \uAE30\uB85D \uC804\uAE4C\uC9C0 \uC774\uC5B4\uC9D1\uB2C8\uB2E4(forward-fill). \uC885\uBAA9\uBCC4 \uADF8\uB798\uD504\uC758 \"\uCD1D\uC790\uC0B0(\uBC30\uB2F9\uD3EC\uD568)\" \uC120\uC740 \uADF8 \uC885\uBAA9\uC5D0\uC11C \uBC1B\uC740 \uC138\uD6C4 \uBC30\uB2F9\uAE08\uAE4C\uC9C0\uB9CC \uD3EC\uD568\uD55C, \uC885\uBAA9 \uB2E8\uC704\uC758 \uBCC4\uB3C4 \uC9C0\uD45C\uC785\uB2C8\uB2E4. \uBCF4\uC720 \uC885\uBAA9\u00B7\uC694\uC57D \uC815\uBCF4\u00B7\uBC30\uB2F9\uAE08\uC740 \uBAA8\uB450 \uB2EC\uB7EC\uC640 \uC6D0\uD654\uB97C \uD568\uAED8 \uBCF4\uC5EC\uB4DC\uB9BD\uB2C8\uB2E4."))))));
+}
+// ---------- salary & other income section ----------
+function IncomeSection({ salaryRecords, salaryMonthRows, salaryForm, setSalaryForm, addSalaryRecord, deleteSalaryRecord, editingSalaryId, setEditingSalaryId, editSalaryForm, setEditSalaryForm, startEditSalary, saveEditSalary, otherIncomeRecords, otherIncomeForm, setOtherIncomeForm, addOtherIncome, deleteOtherIncome, editingOtherIncomeId, setEditingOtherIncomeId, editOtherIncomeForm, setEditOtherIncomeForm, startEditOtherIncome, saveEditOtherIncome, yearlyIncomeTotals, errorMsg }) {
+    return (React.createElement("div", null,
+        errorMsg && (React.createElement("div", { style: { background: "#2A1B1B", border: `1px solid ${LOSS}55`, color: LOSS, padding: "8px 12px", borderRadius: 6, fontSize: 13, marginBottom: 16 } }, errorMsg)),
+        React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
+            React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
+                React.createElement(TrendingUp, { size: 16, color: INK }),
+                " \uC5F0\uB3C4\uBCC4 \uCD1D \uC218\uC785 (\uC5F0\uBD09 + \uAE30\uD0C0\uC18C\uB4DD)"),
+            yearlyIncomeTotals.length === 0 ? (React.createElement("div", { style: { color: MUTED, fontSize: 13 } }, "\uC544\uC9C1 \uC785\uB825\uB41C \uC5F0\uBD09\u00B7\uAE30\uD0C0\uC18C\uB4DD \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.")) : (React.createElement(SimpleBarChart, { data: yearlyIncomeTotals, height: 280, yTickFormat: (v) => "₩" + (v / 1e6).toFixed(0) + "M", tooltipFormat: (v) => fmtKRW(v), bars: [
+                    { key: "연봉", label: "연봉", color: INK },
+                    { key: "기타소득", label: "기타소득", color: OTHER_INCOME_COLOR }
+                ] }))),
+        React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
+            React.createElement("div", { style: { fontWeight: 700, marginBottom: 12 } }, "\uC5F0\uBD09 \uC785\uB825"),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1.6fr 1fr auto", gap: 10, alignItems: "end", marginBottom: 14 } },
+                React.createElement(Field, { label: "\uC6D4" },
+                    React.createElement("input", { style: inputStyle, type: "month", value: salaryForm.date, onChange: (e) => setSalaryForm((f) => ({ ...f, date: e.target.value })) })),
+                React.createElement(Field, { label: "\uD56D\uBAA9" },
+                    React.createElement("select", { style: inputStyle, value: salaryForm.category, onChange: (e) => setSalaryForm((f) => ({ ...f, category: e.target.value })) }, SALARY_CATEGORIES_ALL.map((c) => React.createElement("option", { key: c, value: c }, c)))),
+                React.createElement(Field, { label: "\uAE08\uC561 (+/-)" },
+                    React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: salaryForm.amount, onChange: (e) => setSalaryForm((f) => ({ ...f, amount: e.target.value })) })),
+                React.createElement(Btn, { onClick: addSalaryRecord, style: { height: 34 } }, "\uCD94\uAC00")),
+            React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 14 } }, "\"\uACF5\uC81C\uC561\"\uC744 \uC81C\uC678\uD55C \uBAA8\uB4E0 \uD56D\uBAA9\uC740 \uCD1D\uC9C0\uAE09\uC561\uC5D0 \uD569\uC0B0\uB418\uACE0, \uACF5\uC81C\uC561\uC740 \uB530\uB85C \uC9D1\uACC4\uB3FC\uC694. \uAE08\uC561\uC740 \uC591\uC218(+)\u00B7\uC74C\uC218(\u2212) \uBAA8\uB450 \uC785\uB825\uD560 \uC218 \uC788\uC5B4\uC694."),
+            salaryRecords.length > 0 && (React.createElement("div", { style: { overflowX: "auto", marginBottom: 20 } },
+                React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12 } },
                     React.createElement("thead", null,
                         React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
-                            React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
-                            React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "$ \uC785\uAE08"),
-                            React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\u20A9 \uC785\uAE08"),
-                            React.createElement("th", { style: { padding: 6, width: 50 } }))),
-                    React.createElement("tbody", null, principal.map((p) => {
-                        if (editingPrincipalId === p.id) {
-                            return (React.createElement("tr", { key: p.id, className: "ledger-row" },
-                                React.createElement("td", { style: { padding: 6 } },
-                                    React.createElement("input", { style: { ...inputStyle, width: 130, marginBottom: 4 }, type: "date", value: editPrincipalForm.date, onChange: (e) => setEditPrincipalForm((f) => ({ ...f, date: e.target.value })) }),
-                                    React.createElement(FxFillButton, { date: editPrincipalForm.date, setForm: setEditPrincipalForm, pairs: [["amountUSD", "amountKRW"]], label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
-                                React.createElement("td", { style: { padding: 6 } },
-                                    React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editPrincipalForm.amountUSD, onChange: (e) => setEditPrincipalForm((f) => ({ ...f, amountUSD: e.target.value })) })),
-                                React.createElement("td", { style: { padding: 6 } },
-                                    React.createElement("input", { style: { ...inputStyle, width: 100, textAlign: "right" }, type: "number", step: "any", value: editPrincipalForm.amountKRW, onChange: (e) => setEditPrincipalForm((f) => ({ ...f, amountKRW: e.target.value })) })),
-                                React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                    React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditPrincipal }),
-                                    React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingPrincipalId(null) }))));
+                            React.createElement("th", { style: { textAlign: "left", padding: 5 } }, "\uC6D4"),
+                            React.createElement("th", { style: { textAlign: "left", padding: 5 } }, "\uD56D\uBAA9"),
+                            React.createElement("th", { style: { textAlign: "right", padding: 5 } }, "\uAE08\uC561"),
+                            React.createElement("th", { style: { padding: 5, width: 44 } }))),
+                    React.createElement("tbody", null, [...salaryRecords].sort((a, b) => a.date.localeCompare(b.date)).map((r) => {
+                        if (editingSalaryId === r.id) {
+                            return (React.createElement("tr", { key: r.id, className: "ledger-row" },
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("input", { style: { ...inputStyle, width: 110 }, type: "month", value: editSalaryForm.date, onChange: (e) => setEditSalaryForm((f) => ({ ...f, date: e.target.value })) })),
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("select", { style: { ...inputStyle, width: 220 }, value: editSalaryForm.category, onChange: (e) => setEditSalaryForm((f) => ({ ...f, category: e.target.value })) }, SALARY_CATEGORIES_ALL.map((c) => React.createElement("option", { key: c, value: c }, c)))),
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("input", { style: { ...inputStyle, width: 100, textAlign: "right" }, type: "number", step: "any", value: editSalaryForm.amount, onChange: (e) => setEditSalaryForm((f) => ({ ...f, amount: e.target.value })) })),
+                                React.createElement("td", { style: { padding: 5, textAlign: "center", whiteSpace: "nowrap" } },
+                                    React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditSalary }),
+                                    React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingSalaryId(null) }))));
                         }
-                        return (React.createElement("tr", { key: p.id, className: "ledger-row" },
-                            React.createElement("td", { className: "mono", style: { padding: 6 } }, p.date),
-                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, p.amountUSD ? fmtUSD(p.amountUSD) : "—"),
-                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, p.amountKRW ? fmtKRW(p.amountKRW) : "—"),
-                            React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditPrincipal(p) }),
-                                React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => setPrincipal((prev) => prev.filter((x) => x.id !== p.id)) }))));
+                        return (React.createElement("tr", { key: r.id, className: "ledger-row" },
+                            React.createElement("td", { className: "mono", style: { padding: 5 } }, r.date),
+                            React.createElement("td", { style: { padding: 5 } }, r.category),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 5, color: r.amount < 0 ? LOSS : TEXT } }, fmtKRW(r.amount)),
+                            React.createElement("td", { style: { padding: 5, textAlign: "center", whiteSpace: "nowrap" } },
+                                React.createElement(Pencil, { size: 12, color: MUTED, style: { cursor: "pointer", marginRight: 6 }, onClick: () => startEditSalary(r) }),
+                                React.createElement(Trash2, { size: 12, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteSalaryRecord(r.id) }))));
                     }))))),
-            React.createElement(Panel, { style: { padding: 18, marginTop: 20 } },
-                React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
-                    React.createElement(Coins, { size: 16, color: DIV_COLOR }),
-                    " \uBC30\uB2F9\uAE08 \uAE30\uB85D"),
-                React.createElement("div", { style: {
-                        border: `1px dashed ${LINE}`, borderRadius: 6, padding: 14, marginBottom: 14,
-                        display: "flex", flexDirection: "column", gap: 10
-                    } },
-                    React.createElement("div", { style: { fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
-                        React.createElement(Upload, { size: 14, color: DIV_COLOR }),
-                        " \uC5D1\uC140\uB85C \uD55C \uBC88\uC5D0 \uAC00\uC838\uC624\uAE30"),
-                    React.createElement("div", { style: { fontSize: 11, color: MUTED } }, "1) \uC544\uB798\uC5D0\uC11C \uC5D1\uC140 \uD30C\uC77C(.xlsx)\uC744 \uC120\uD0DD\uD558\uACE0 2) \"\uAC00\uC838\uC624\uAE30 \uC2E4\uD589\" \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694. \"\uC885\uBAA9\", \"\uB0A0\uC9DC\", \"\uC138\uC804 ($/\u20A9)\", \"\uC138\uD6C4 ($/\u20A9)\" \uC5F4\uC774 \uC788\uC73C\uBA74 \uC790\uB3D9\uC73C\uB85C \uC778\uC2DD\uD574\uC694. \uC774\uBBF8 \uB4F1\uB85D\uB41C \uD56D\uBAA9(\uC885\uBAA9\u00B7\uB0A0\uC9DC\u00B7\uC138\uD6C4 \uAE08\uC561\uC774 \uBAA8\uB450 \uAC19\uC740 \uACBD\uC6B0)\uC740 \uC911\uBCF5\uC73C\uB85C \uCD94\uAC00\uB418\uC9C0 \uC54A\uC544\uC694."),
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-                        React.createElement("input", { ref: excelFileInputRef, type: "file", accept: ".xlsx,.xls", style: { fontSize: 12, color: TEXT, maxWidth: 260 }, onChange: (e) => {
-                                const file = e.target.files && e.target.files[0];
-                                setPendingFile(file || null);
-                                setImportStatus("idle");
-                                setImportMsg(file ? `선택됨: ${file.name} — "가져오기 실행"을 눌러주세요.` : "");
-                            } }),
-                        React.createElement(Btn, { onClick: () => pendingFile && handleExcelImport(pendingFile), disabled: !pendingFile || importStatus === "busy", style: { background: DIV_COLOR, border: `1px solid ${DIV_COLOR}`, color: "#0E1A24" } },
-                            importStatus === "busy" ? React.createElement(Loader2, { size: 13, className: "spin" }) : React.createElement(Upload, { size: 13 }),
-                            " \uAC00\uC838\uC624\uAE30 \uC2E4\uD589")),
-                    importMsg && (React.createElement("div", { style: {
-                            fontSize: 12, padding: "8px 10px", borderRadius: 5,
-                            background: importStatus === "error" ? "#2A1B1B" : importStatus === "done" ? "#16241F" : PANEL_SOFT,
-                            border: `1px solid ${importStatus === "error" ? LOSS + "55" : importStatus === "done" ? GAIN + "55" : LINE}`,
-                            color: importStatus === "error" ? LOSS : importStatus === "done" ? GAIN : MUTED
-                        } }, importMsg))),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, marginBottom: 10 } },
-                    React.createElement(Field, { label: "\uC885\uBAA9" },
-                        React.createElement("input", { style: inputStyle, placeholder: "AAPL", value: dividendForm.ticker, onChange: (e) => setDividendForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() })) })),
-                    React.createElement(Field, { label: "\uC9C0\uAE09 \uB0A0\uC9DC" },
-                        React.createElement("input", { style: inputStyle, type: "date", value: dividendForm.date, onChange: (e) => setDividendForm((f) => ({ ...f, date: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uC804 ($) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.preTaxUSD, onChange: (e) => setDividendForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uC804 (\u20A9) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.preTaxKRW, onChange: (e) => setDividendForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uD6C4 ($)" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.postTaxUSD, onChange: (e) => setDividendForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uD6C4 (\u20A9)" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: dividendForm.postTaxKRW, onChange: (e) => setDividendForm((f) => ({ ...f, postTaxKRW: e.target.value })) }))),
-                React.createElement("div", { style: { marginBottom: 4, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-                    React.createElement(Btn, { onClick: addDividend, style: { height: 34, background: DIV_COLOR, border: `1px solid ${DIV_COLOR}`, color: "#0E1A24" } }, "\uCD94\uAC00"),
-                    React.createElement(FxFillButton, { date: dividendForm.date, setForm: setDividendForm, onFx: recordFx })),
-                React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 14 } }, "\uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD588\uB2E4\uBA74 \uC870\uD68C \uBC84\uD2BC\uC73C\uB85C \uB098\uBA38\uC9C0\uB97C \uC790\uB3D9\uC73C\uB85C \uCC44\uC6B8 \uC218 \uC788\uC5B4\uC694 \u00B7 \uC138\uC804\uC744 \uBE44\uC6CC\uB450\uBA74 \uC138\uD6C4\uC640 \uB3D9\uC77C\uD55C \uAC83\uC73C\uB85C \uCC98\uB9AC\uB3FC\uC694"),
-                dividends.length > 0 && (React.createElement("div", { style: { overflowX: "auto" } },
-                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
-                        React.createElement("thead", null,
-                            React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
-                                React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uC885\uBAA9"),
-                                React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 $"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \u20A9"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 $"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 \u20A9"),
-                                React.createElement("th", { style: { padding: 6, width: 50 } }))),
-                        React.createElement("tbody", null, [...dividends].sort((a, b) => a.date.localeCompare(b.date)).map((d) => {
-                            if (editingDividendId === d.id) {
-                                return (React.createElement("tr", { key: d.id, className: "ledger-row" },
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 70 }, value: editDividendForm.ticker, onChange: (e) => setEditDividendForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() })) })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 125, marginBottom: 4 }, type: "date", value: editDividendForm.date, onChange: (e) => setEditDividendForm((f) => ({ ...f, date: e.target.value })) }),
-                                        React.createElement(FxFillButton, { date: editDividendForm.date, setForm: setEditDividendForm, label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.preTaxUSD, onChange: (e) => setEditDividendForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.preTaxKRW, onChange: (e) => setEditDividendForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.postTaxUSD, onChange: (e) => setEditDividendForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editDividendForm.postTaxKRW, onChange: (e) => setEditDividendForm((f) => ({ ...f, postTaxKRW: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                        React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditDividend }),
-                                        React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingDividendId(null) }))));
-                            }
-                            return (React.createElement("tr", { key: d.id, className: "ledger-row" },
-                                React.createElement("td", { className: "mono", style: { padding: 6, fontWeight: 700 } }, d.ticker),
-                                React.createElement("td", { className: "mono", style: { padding: 6 } }, d.date),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxUSD ? fmtUSD(d.preTaxUSD) : "—"),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxKRW ? fmtKRW(d.preTaxKRW) : "—"),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: DIV_COLOR } }, d.postTaxUSD ? fmtUSD(d.postTaxUSD) : "—"),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: DIV_COLOR } }, d.postTaxKRW ? fmtKRW(d.postTaxKRW) : "—"),
-                                React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                    React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditDividend(d) }),
-                                    React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteDividend(d.id) }))));
-                        })))))),
-            React.createElement(Panel, { style: { padding: 18, marginTop: 20 } },
-                React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
-                    React.createElement(Coins, { size: 16, color: INTEREST_COLOR }),
-                    " \uACC4\uC88C \uC774\uC790 \uC218\uC785"),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10, marginBottom: 10 } },
-                    React.createElement(Field, { label: "\uC9C0\uAE09 \uB0A0\uC9DC" },
-                        React.createElement("input", { style: inputStyle, type: "date", value: interestForm.date, onChange: (e) => setInterestForm((f) => ({ ...f, date: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uC804 ($) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.preTaxUSD, onChange: (e) => setInterestForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uC804 (\u20A9) \u2014 \uC120\uD0DD" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.preTaxKRW, onChange: (e) => setInterestForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uD6C4 ($)" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.postTaxUSD, onChange: (e) => setInterestForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
-                    React.createElement(Field, { label: "\uC138\uD6C4 (\u20A9)" },
-                        React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: interestForm.postTaxKRW, onChange: (e) => setInterestForm((f) => ({ ...f, postTaxKRW: e.target.value })) }))),
-                React.createElement("div", { style: { marginBottom: 4, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
-                    React.createElement(Btn, { onClick: addInterest, style: { height: 34, background: INTEREST_COLOR, border: `1px solid ${INTEREST_COLOR}`, color: "#0E1A1A" } }, "\uCD94\uAC00"),
-                    React.createElement(FxFillButton, { date: interestForm.date, setForm: setInterestForm, onFx: recordFx })),
-                React.createElement("div", { style: { fontSize: 11, color: MUTED, marginBottom: 14 } }, "\uC608\uAE08\u00B7MMF\u00B7CMA \uC774\uC790\uCC98\uB7FC \uD2B9\uC815 \uC885\uBAA9\uC5D0 \uC18D\uD558\uC9C0 \uC54A\uB294 \uACC4\uC88C \uB2E8\uC704 \uC774\uC790 \uC218\uC785\uC744 \uAE30\uB85D\uD574\uC694. \uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD588\uB2E4\uBA74 \uC870\uD68C \uBC84\uD2BC\uC73C\uB85C \uB098\uBA38\uC9C0\uB97C \uC790\uB3D9\uC73C\uB85C \uCC44\uC6B8 \uC218 \uC788\uACE0, \uC138\uC804\uC744 \uBE44\uC6CC\uB450\uBA74 \uC138\uD6C4\uC640 \uB3D9\uC77C\uD55C \uAC83\uC73C\uB85C \uCC98\uB9AC\uB3FC\uC694."),
-                interestIncome.length > 0 && (React.createElement("div", { style: { overflowX: "auto" } },
-                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
-                        React.createElement("thead", null,
-                            React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
-                                React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uB0A0\uC9DC"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 $"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \u20A9"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 $"),
-                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 \u20A9"),
-                                React.createElement("th", { style: { padding: 6, width: 50 } }))),
-                        React.createElement("tbody", null, [...interestIncome].sort((a, b) => a.date.localeCompare(b.date)).map((d) => {
-                            if (editingInterestId === d.id) {
-                                return (React.createElement("tr", { key: d.id, className: "ledger-row" },
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 125, marginBottom: 4 }, type: "date", value: editInterestForm.date, onChange: (e) => setEditInterestForm((f) => ({ ...f, date: e.target.value })) }),
-                                        React.createElement(FxFillButton, { date: editInterestForm.date, setForm: setEditInterestForm, label: "\uD658\uC728 \uC870\uD68C", onFx: recordFx })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.preTaxUSD, onChange: (e) => setEditInterestForm((f) => ({ ...f, preTaxUSD: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.preTaxKRW, onChange: (e) => setEditInterestForm((f) => ({ ...f, preTaxKRW: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 80, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.postTaxUSD, onChange: (e) => setEditInterestForm((f) => ({ ...f, postTaxUSD: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6 } },
-                                        React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editInterestForm.postTaxKRW, onChange: (e) => setEditInterestForm((f) => ({ ...f, postTaxKRW: e.target.value })) })),
-                                    React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                        React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditInterest }),
-                                        React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingInterestId(null) }))));
-                            }
-                            return (React.createElement("tr", { key: d.id, className: "ledger-row" },
-                                React.createElement("td", { className: "mono", style: { padding: 6 } }, d.date),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxUSD ? fmtUSD(d.preTaxUSD) : "—"),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, d.preTaxKRW ? fmtKRW(d.preTaxKRW) : "—"),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: INTEREST_COLOR } }, d.postTaxUSD ? fmtUSD(d.postTaxUSD) : "—"),
-                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: INTEREST_COLOR } }, d.postTaxKRW ? fmtKRW(d.postTaxKRW) : "—"),
-                                React.createElement("td", { style: { padding: 6, textAlign: "center", whiteSpace: "nowrap" } },
-                                    React.createElement(Pencil, { size: 13, color: MUTED, style: { cursor: "pointer", marginRight: 8 }, onClick: () => startEditInterest(d) }),
-                                    React.createElement(Trash2, { size: 13, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteInterest(d.id) }))));
-                        })))))),
-            React.createElement("div", { style: { fontSize: 11, color: MUTED, marginTop: 18, lineHeight: 1.6 } }, "\uAC00\uACA9 \uB370\uC774\uD130\uB294 \uC9C1\uC811 \uC785\uB825\uD558\uAC70\uB098, AI \uC6F9 \uAC80\uC0C9\uC744 \uD1B5\uD574 \uC870\uD68C\uD55C \uC885\uAC00 \uAE30\uC900\uC785\uB2C8\uB2E4. \uC2E4\uC2DC\uAC04 \uC2DC\uC138\uC640\uB294 \uCC28\uC774\uAC00 \uC788\uC744 \uC218 \uC788\uC73C\uBA70, \uADF8\uB798\uD504\uC758 \uAC01 \uC9C0\uC810\uC740 \uAC70\uB798\uC77C \uBC0F \uC870\uD68C\uD55C \uB0A0\uC9DC(\uCCB4\uD06C\uD3EC\uC778\uD2B8)\uB97C \uAE30\uC900\uC73C\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uB354 \uCD18\uCD18\uD55C \uADF8\uB798\uD504\uB97C \uC6D0\uD558\uC2DC\uBA74 \uC885\uBAA9\uC744 \uD3BC\uCCD0 \uC6D0\uD558\uB294 \uB0A0\uC9DC\uB97C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uB85C \uCD94\uAC00\uD574\uBCF4\uC138\uC694. \uB9E4\uB3C4 \uC2DC \uD3C9\uADE0\uB2E8\uAC00\uBC95\uC73C\uB85C \uC2E4\uD604\uC190\uC775\uC744 \uACC4\uC0B0\uD558\uBA70, \"\uCD1D\uC190\uC775\uB960\"\uC740 \uC2E4\uD604\uC190\uC775, \uBBF8\uC2E4\uD604\uC190\uC775, \uC138\uD6C4 \uBC30\uB2F9\uAE08\uC744 \uBAA8\uB450 \uD569\uC0B0\uD574 \uADF8 \uC885\uBAA9\uC5D0 \uD22C\uC785\uD55C \uCD1D \uB9E4\uC785\uAE08\uC561 \uB300\uBE44 \uBE44\uC728\uB85C \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uC6D0\uAE08 \uB300\uBE44 \uC218\uC775\uB960\uC5D0\uB3C4 \uC138\uD6C4 \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785 \uC218\uB839\uC561\uC774 \uD3EC\uD568\uB418\uC5B4 \uACC4\uC0B0\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785\uC740 \uC138\uC804/\uC138\uD6C4 \uAE08\uC561\uC744 \uD568\uAED8 \uAE30\uB85D\uD560 \uC218 \uC788\uACE0, \uC790\uC0B0 \uBCC0\uD654 \uCD94\uC801(\uADF8\uB798\uD504\u00B7\uC218\uC775\uB960 \uACC4\uC0B0)\uC5D0\uB294 \uC2E4\uC81C\uB85C \uC190\uC5D0 \uB4E4\uC5B4\uC628 \uC138\uD6C4 \uAE08\uC561\uB9CC \uC0AC\uC6A9\uB429\uB2C8\uB2E4. \uBC30\uB2F9\uAE08\u00B7\uC774\uC790\uC218\uC785\u00B7\uC6D0\uAE08\u00B7\uB9E4\uC218/\uB9E4\uB3C4\u00B7\uACC4\uC88C \uD604\uAE08 \uC785\uB825 \uC2DC \"\uD658\uC728 \uC870\uD68C\" \uBC84\uD2BC\uC744 \uB204\uB974\uBA74 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uC744 \uC870\uD68C\uD574 \uD55C\uCABD \uD1B5\uD654\uB9CC \uC785\uB825\uD55C \uAE08\uC561\uC744 \uC790\uB3D9\uC73C\uB85C \uCC44\uC6CC\uC90D\uB2C8\uB2E4 (\uC591\uCABD\uC744 \uC774\uBBF8 \uC785\uB825\uD588\uB2E4\uBA74 \uADF8\uB300\uB85C \uB461\uB2C8\uB2E4). \uCD1D \uC790\uC0B0 \uADF8\uB798\uD504\uC758 \uAD75\uC740 \"\uD3C9\uAC00\uAE08\uC561\" \uC120\uC740 \uBCF4\uC720 \uC911\uC778 \uAD6D\uB0B4\u00B7\uD574\uC678 \uC8FC\uC2DD\uC744 \uAC01 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uD569\uC0B0\uD55C \uAC12\uC774\uACE0, \"\uACC4\uC88C\uD604\uAE08\"\u00B7\"\uB204\uC801\uBC30\uB2F9\uAE08\"\u00B7\"\uB204\uC801\uC774\uC790\uC218\uC785\" \uC120\uB3C4 \uD55C\uCABD \uD1B5\uD654\uB9CC \uAE30\uB85D\uB41C \uACBD\uC6B0 \uADF8 \uB0A0\uC9DC\uC758 \uD658\uC728\uB85C \uD658\uC0B0\uD574 \uCC44\uC6CC \uB123\uC2B5\uB2C8\uB2E4(\uB2E8, \uC9C0\uAE08\uAE4C\uC9C0 \uD55C \uBC88\uC774\uB77C\uB3C4 \uC870\uD68C\uB41C \uD658\uC728\uC774 \uC788\uC5B4\uC57C \uD658\uC0B0\uC774 \uAC00\uB2A5\uD574\uC694). \uACC4\uC88C \uD604\uAE08\uC740 \"\uACC4\uC88C \uD604\uAE08 \uAE30\uB85D\"\uC5D0 \uC785\uB825\uD55C \uC2A4\uB0C5\uC0F7\uC744 \uAE30\uC900\uC73C\uB85C \uB2E4\uC74C \uAE30\uB85D \uC804\uAE4C\uC9C0 \uC774\uC5B4\uC9D1\uB2C8\uB2E4(forward-fill). \uC885\uBAA9\uBCC4 \uADF8\uB798\uD504\uC758 \"\uCD1D\uC790\uC0B0(\uBC30\uB2F9\uD3EC\uD568)\" \uC120\uC740 \uADF8 \uC885\uBAA9\uC5D0\uC11C \uBC1B\uC740 \uC138\uD6C4 \uBC30\uB2F9\uAE08\uAE4C\uC9C0\uB9CC \uD3EC\uD568\uD55C, \uC885\uBAA9 \uB2E8\uC704\uC758 \uBCC4\uB3C4 \uC9C0\uD45C\uC785\uB2C8\uB2E4. \uBCF4\uC720 \uC885\uBAA9\u00B7\uC694\uC57D \uC815\uBCF4\u00B7\uBC30\uB2F9\uAE08\uC740 \uBAA8\uB450 \uB2EC\uB7EC\uC640 \uC6D0\uD654\uB97C \uD568\uAED8 \uBCF4\uC5EC\uB4DC\uB9BD\uB2C8\uB2E4."))));
+            salaryMonthRows.length > 0 && (React.createElement("div", null,
+                React.createElement("div", { style: { fontSize: 12, color: MUTED, marginBottom: 8 } }, "\uC6D4\uBCC4 \uC815\uB9AC"),
+                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 } }, [...salaryMonthRows].reverse().map((row) => (React.createElement("div", { key: row.month, style: { border: `1px solid ${LINE}`, borderRadius: 8, padding: 14 } },
+                    React.createElement("div", { style: { fontWeight: 700, marginBottom: 8 } }, row.month),
+                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12 } },
+                        React.createElement("tbody", null,
+                            SALARY_CATEGORIES.filter((c) => row.cats[c]).map((c) => (React.createElement("tr", { key: c },
+                                React.createElement("td", { style: { padding: "3px 0", color: MUTED } }, c),
+                                React.createElement("td", { className: "mono", style: { padding: "3px 0", textAlign: "right" } }, fmtKRW(row.cats[c]))))),
+                            React.createElement("tr", { style: { borderTop: `1px solid ${LINE}` } },
+                                React.createElement("td", { style: { padding: "6px 0 3px", fontWeight: 700 } }, "\uCD1D\uC9C0\uAE09\uC561"),
+                                React.createElement("td", { className: "mono", style: { padding: "6px 0 3px", textAlign: "right", fontWeight: 700 } }, fmtKRW(row.gross))),
+                            React.createElement("tr", null,
+                                React.createElement("td", { style: { padding: "3px 0", color: LOSS } }, "\uACF5\uC81C\uC561"),
+                                React.createElement("td", { className: "mono", style: { padding: "3px 0", textAlign: "right", color: LOSS } }, row.deduction ? fmtKRW(row.deduction) : "—")),
+                            React.createElement("tr", { style: { borderTop: `1px solid ${LINE}` } },
+                                React.createElement("td", { style: { padding: "6px 0 0", fontWeight: 700 } }, "\uCC28\uAC10\uC9C0\uAE09\uC561"),
+                                React.createElement("td", { className: "mono", style: { padding: "6px 0 0", textAlign: "right", fontWeight: 700, color: row.net >= 0 ? GAIN : LOSS } }, fmtKRW(row.net)))))))))))),
+        React.createElement(Panel, { style: { padding: 18 } },
+            React.createElement("div", { style: { fontWeight: 700, marginBottom: 12 } }, "\uAE30\uD0C0\uC18C\uB4DD \uC785\uB825"),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 2fr 1fr 1fr auto", gap: 10, alignItems: "end", marginBottom: 14 } },
+                React.createElement(Field, { label: "\uB0A0\uC9DC" },
+                    React.createElement("input", { style: inputStyle, type: "date", value: otherIncomeForm.date, onChange: (e) => setOtherIncomeForm((f) => ({ ...f, date: e.target.value })) })),
+                React.createElement(Field, { label: "\uD56D\uBAA9" },
+                    React.createElement("select", { style: inputStyle, value: otherIncomeForm.category, onChange: (e) => setOtherIncomeForm((f) => ({ ...f, category: e.target.value })) }, OTHER_INCOME_CATEGORIES.map((c) => React.createElement("option", { key: c, value: c }, c)))),
+                React.createElement(Field, { label: "\uB0B4\uC6A9 (\uC120\uD0DD)" },
+                    React.createElement("input", { style: inputStyle, placeholder: "\uC608: OO\uB300\uD559 \uB17C\uBB38 \uC2EC\uC0AC", value: otherIncomeForm.description, onChange: (e) => setOtherIncomeForm((f) => ({ ...f, description: e.target.value })) })),
+                React.createElement(Field, { label: "\uC561\uC218" },
+                    React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: otherIncomeForm.amount, onChange: (e) => setOtherIncomeForm((f) => ({ ...f, amount: e.target.value })) })),
+                React.createElement(Field, { label: "\uACF5\uC81C\uC561" },
+                    React.createElement("input", { style: inputStyle, type: "number", step: "any", placeholder: "0", value: otherIncomeForm.deduction, onChange: (e) => setOtherIncomeForm((f) => ({ ...f, deduction: e.target.value })) })),
+                React.createElement(Btn, { onClick: addOtherIncome, style: { height: 34 } }, "\uCD94\uAC00")),
+            otherIncomeRecords.length > 0 && (React.createElement("div", { style: { overflowX: "auto" } },
+                React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12 } },
+                    React.createElement("thead", null,
+                        React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
+                            React.createElement("th", { style: { textAlign: "left", padding: 5 } }, "\uB0A0\uC9DC"),
+                            React.createElement("th", { style: { textAlign: "left", padding: 5 } }, "\uD56D\uBAA9"),
+                            React.createElement("th", { style: { textAlign: "left", padding: 5 } }, "\uB0B4\uC6A9"),
+                            React.createElement("th", { style: { textAlign: "right", padding: 5 } }, "\uC561\uC218"),
+                            React.createElement("th", { style: { textAlign: "right", padding: 5 } }, "\uACF5\uC81C\uC561"),
+                            React.createElement("th", { style: { textAlign: "right", padding: "5px 10px" } }, "\uCC28\uAC10\uC9C0\uAE09\uC561"),
+                            React.createElement("th", { style: { padding: 5, width: 44 } }))),
+                    React.createElement("tbody", null, [...otherIncomeRecords].sort((a, b) => a.date.localeCompare(b.date)).map((r) => {
+                        if (editingOtherIncomeId === r.id) {
+                            return (React.createElement("tr", { key: r.id, className: "ledger-row" },
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("input", { style: { ...inputStyle, width: 120 }, type: "date", value: editOtherIncomeForm.date, onChange: (e) => setEditOtherIncomeForm((f) => ({ ...f, date: e.target.value })) })),
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("select", { style: { ...inputStyle, width: 100 }, value: editOtherIncomeForm.category, onChange: (e) => setEditOtherIncomeForm((f) => ({ ...f, category: e.target.value })) }, OTHER_INCOME_CATEGORIES.map((c) => React.createElement("option", { key: c, value: c }, c)))),
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("input", { style: { ...inputStyle, width: 160 }, value: editOtherIncomeForm.description, onChange: (e) => setEditOtherIncomeForm((f) => ({ ...f, description: e.target.value })) })),
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editOtherIncomeForm.amount, onChange: (e) => setEditOtherIncomeForm((f) => ({ ...f, amount: e.target.value })) })),
+                                React.createElement("td", { style: { padding: 5 } },
+                                    React.createElement("input", { style: { ...inputStyle, width: 90, textAlign: "right" }, type: "number", step: "any", value: editOtherIncomeForm.deduction, onChange: (e) => setEditOtherIncomeForm((f) => ({ ...f, deduction: e.target.value })) })),
+                                React.createElement("td", { className: "mono", style: { textAlign: "right", padding: "5px 10px", fontWeight: 700 } }, fmtKRW((parseFloat(editOtherIncomeForm.amount) || 0) - (parseFloat(editOtherIncomeForm.deduction) || 0))),
+                                React.createElement("td", { style: { padding: 5, textAlign: "center", whiteSpace: "nowrap" } },
+                                    React.createElement(Check, { size: 14, color: GAIN, style: { cursor: "pointer", marginRight: 8 }, onClick: saveEditOtherIncome }),
+                                    React.createElement(X, { size: 14, color: MUTED, style: { cursor: "pointer" }, onClick: () => setEditingOtherIncomeId(null) }))));
+                        }
+                        const net = (r.amount || 0) - (r.deduction || 0);
+                        return (React.createElement("tr", { key: r.id, className: "ledger-row" },
+                            React.createElement("td", { className: "mono", style: { padding: 5 } }, r.date),
+                            React.createElement("td", { style: { padding: 5 } }, r.category),
+                            React.createElement("td", { style: { padding: 5, color: MUTED } }, r.description || "—"),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 5 } }, fmtKRW(r.amount)),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 5, color: r.deduction ? LOSS : MUTED } }, r.deduction ? fmtKRW(r.deduction) : "—"),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: "5px 10px", fontWeight: 700, color: net >= 0 ? GAIN : LOSS } }, fmtKRW(net)),
+                            React.createElement("td", { style: { padding: 5, textAlign: "center", whiteSpace: "nowrap" } },
+                                React.createElement(Pencil, { size: 12, color: MUTED, style: { cursor: "pointer", marginRight: 6 }, onClick: () => startEditOtherIncome(r) }),
+                                React.createElement(Trash2, { size: 12, color: MUTED, style: { cursor: "pointer" }, onClick: () => deleteOtherIncome(r.id) }))));
+                    }))))))));
 }
 // ---------- ticker detail panel ----------
 function TickerDetail({ ticker, transactions, dividends, onDeleteDividend, onEditDividend, series, missingDates, busyKeys, onFetch, onDeleteTx, onEditTx, chartCurrency, setChartCurrency, checkpointDate, setCheckpointDate, onAddCheckpoint, manualEntry, setManualEntry, onSaveManual, recordFx }) {
