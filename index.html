@@ -1106,22 +1106,30 @@ function PortfolioTracker({ onSignOut, userEmail }) {
         });
     }, [salaryByMonth]);
     const yearlyIncomeTotals = useMemo(() => {
-        const map = {}; // fiscalYearStart -> { salary, other }
+        const map = {}; // fiscalYearStart -> { salaryGross, salaryNet, otherGross, otherNet }
         for (const row of salaryMonthRows) {
             const year = fiscalYearOf(row.month);
             if (!map[year])
-                map[year] = { salary: 0, other: 0 };
-            map[year].salary += row.net;
+                map[year] = { salaryGross: 0, salaryNet: 0, otherGross: 0, otherNet: 0 };
+            map[year].salaryGross += row.gross;
+            map[year].salaryNet += row.net;
         }
         for (const r of otherIncomeRecords) {
             const year = fiscalYearOf(r.date);
             if (!map[year])
-                map[year] = { salary: 0, other: 0 };
-            map[year].other += (r.amount || 0) - (r.deduction || 0);
+                map[year] = { salaryGross: 0, salaryNet: 0, otherGross: 0, otherNet: 0 };
+            map[year].otherGross += r.amount || 0;
+            map[year].otherNet += (r.amount || 0) - (r.deduction || 0);
         }
-        return Object.keys(map).map(Number).sort((a, b) => a - b).map((year) => ({
-            year: fiscalYearLabel(year), 연봉: map[year].salary, 기타소득: map[year].other, 총수입: map[year].salary + map[year].other
-        }));
+        return Object.keys(map).map(Number).sort((a, b) => a - b).map((year) => {
+            const v = map[year];
+            return {
+                year: fiscalYearLabel(year),
+                세전연봉: v.salaryGross, 세후연봉: v.salaryNet,
+                세전기타소득: v.otherGross, 세후기타소득: v.otherNet,
+                세전총액: v.salaryGross + v.otherGross, 세후총액: v.salaryNet + v.otherNet
+            };
+        });
     }, [salaryMonthRows, otherIncomeRecords]);
     // ---- transaction handling ----
     const addTransaction = () => {
@@ -2535,16 +2543,45 @@ function PortfolioTracker({ onSignOut, userEmail }) {
 }
 // ---------- salary & other income section ----------
 function IncomeSection({ salaryRecords, salaryMonthRows, salaryForm, setSalaryForm, addSalaryRecord, deleteSalaryRecord, editingSalaryId, setEditingSalaryId, editSalaryForm, setEditSalaryForm, startEditSalary, saveEditSalary, otherIncomeRecords, otherIncomeForm, setOtherIncomeForm, addOtherIncome, deleteOtherIncome, editingOtherIncomeId, setEditingOtherIncomeId, editOtherIncomeForm, setEditOtherIncomeForm, startEditOtherIncome, saveEditOtherIncome, yearlyIncomeTotals, errorMsg }) {
+    const [yearlyMode, setYearlyMode] = useState("post"); // "pre" | "post" — which pair the chart's stacked bars show
     return (React.createElement("div", null,
         errorMsg && (React.createElement("div", { style: { background: "#2A1B1B", border: `1px solid ${LOSS}55`, color: LOSS, padding: "8px 12px", borderRadius: 6, fontSize: 13, marginBottom: 16 } }, errorMsg)),
         React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
-            React.createElement("div", { style: { fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 6 } },
-                React.createElement(TrendingUp, { size: 16, color: INK }),
-                " \uC5F0\uB3C4\uBCC4 \uCD1D \uC218\uC785 (\uC5F0\uBD09 + \uAE30\uD0C0\uC18C\uB4DD)"),
-            yearlyIncomeTotals.length === 0 ? (React.createElement("div", { style: { color: MUTED, fontSize: 13 } }, "\uC544\uC9C1 \uC785\uB825\uB41C \uC5F0\uBD09\u00B7\uAE30\uD0C0\uC18C\uB4DD \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.")) : (React.createElement(SimpleBarChart, { data: yearlyIncomeTotals, height: 280, yTickFormat: (v) => "₩" + (v / 1e6).toFixed(0) + "M", tooltipFormat: (v) => fmtKRW(v), bars: [
-                    { key: "연봉", label: "연봉", color: INK },
-                    { key: "기타소득", label: "기타소득", color: OTHER_INCOME_COLOR }
-                ] }))),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 12 } },
+                React.createElement("div", { style: { fontWeight: 700, display: "flex", alignItems: "center", gap: 6 } },
+                    React.createElement(TrendingUp, { size: 16, color: INK }),
+                    " \uC5F0\uB3C4\uBCC4 \uCD1D \uC218\uC785 (\uC5F0\uBD09 + \uAE30\uD0C0\uC18C\uB4DD)"),
+                React.createElement("div", { style: { display: "flex", gap: 6 } },
+                    React.createElement(Btn, { variant: yearlyMode === "pre" ? "primary" : "ghost", style: { padding: "4px 10px", fontSize: 12 }, onClick: () => setYearlyMode("pre") }, "\uC138\uC804"),
+                    React.createElement(Btn, { variant: yearlyMode === "post" ? "primary" : "ghost", style: { padding: "4px 10px", fontSize: 12 }, onClick: () => setYearlyMode("post") }, "\uC138\uD6C4"))),
+            yearlyIncomeTotals.length === 0 ? (React.createElement("div", { style: { color: MUTED, fontSize: 13 } }, "\uC544\uC9C1 \uC785\uB825\uB41C \uC5F0\uBD09\u00B7\uAE30\uD0C0\uC18C\uB4DD \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.")) : (React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { marginBottom: 20 } },
+                    React.createElement(SimpleBarChart, { data: yearlyIncomeTotals, height: 280, yTickFormat: (v) => "₩" + (v / 1e6).toFixed(0) + "M", tooltipFormat: (v) => fmtKRW(v), bars: yearlyMode === "pre" ? [
+                            { key: "세전연봉", label: "세전 연봉", color: INK },
+                            { key: "세전기타소득", label: "세전 기타소득", color: OTHER_INCOME_COLOR }
+                        ] : [
+                            { key: "세후연봉", label: "세후 연봉", color: INK },
+                            { key: "세후기타소득", label: "세후 기타소득", color: OTHER_INCOME_COLOR }
+                        ] })),
+                React.createElement("div", { style: { overflowX: "auto" } },
+                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12 } },
+                        React.createElement("thead", null,
+                            React.createElement("tr", { style: { color: MUTED, fontSize: 11 } },
+                                React.createElement("th", { style: { textAlign: "left", padding: 6 } }, "\uC5F0\uB3C4"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \uC5F0\uBD09"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 \uC5F0\uBD09"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \uAE30\uD0C0\uC18C\uB4DD"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uD6C4 \uAE30\uD0C0\uC18C\uB4DD"),
+                                React.createElement("th", { style: { textAlign: "right", padding: 6 } }, "\uC138\uC804 \uCD1D\uC561"),
+                                React.createElement("th", { style: { textAlign: "right", padding: "6px 10px", fontWeight: 700 } }, "\uC138\uD6C4 \uCD1D\uC561"))),
+                        React.createElement("tbody", null, yearlyIncomeTotals.map((row) => (React.createElement("tr", { key: row.year, className: "ledger-row" },
+                            React.createElement("td", { className: "mono", style: { padding: 6, fontWeight: 700 } }, row.year),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, fmtKRW(row.세전연봉)),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, fmtKRW(row.세후연봉)),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, fmtKRW(row.세전기타소득)),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6 } }, fmtKRW(row.세후기타소득)),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: 6, color: MUTED } }, fmtKRW(row.세전총액)),
+                            React.createElement("td", { className: "mono", style: { textAlign: "right", padding: "6px 10px", fontWeight: 700, color: GAIN } }, fmtKRW(row.세후총액))))))))))),
         React.createElement(Panel, { style: { padding: 18, marginBottom: 20 } },
             React.createElement("div", { style: { fontWeight: 700, marginBottom: 12 } }, "\uC5F0\uBD09 \uC785\uB825"),
             React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1.6fr 1fr auto", gap: 10, alignItems: "end", marginBottom: 14 } },
