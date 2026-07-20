@@ -2929,16 +2929,18 @@ function AuthGate() {
                     accounts: accountList,
                     activeAccountId: meta.activeAccountId,
                     accountData,
-                    fxCache: meta.fxCache || {}
+                    fxCache: meta.fxCache || {},
+                    salaryRecords: meta.salaryRecords || [],
+                    otherIncomeRecords: meta.otherIncomeRecords || []
                 });
                 return { key, value };
             },
             set: async (key, value) => {
                 try {
                     const parsed = JSON.parse(value);
-                    const { accounts: accList = [], activeAccountId: activeId, accountData = {}, fxCache = {} } = parsed;
+                    const { accounts: accList = [], activeAccountId: activeId, accountData = {}, fxCache = {}, salaryRecords = [], otherIncomeRecords = [] } = parsed;
                     const batch = firebase.firestore().batch();
-                    batch.set(metaRef, { accounts: accList, activeAccountId: activeId, fxCache }, { merge: false });
+                    batch.set(metaRef, { accounts: accList, activeAccountId: activeId, fxCache, salaryRecords, otherIncomeRecords }, { merge: false });
                     for (const accId of Object.keys(accountData)) {
                         batch.set(accountsColl.doc(accId), accountData[accId] || {}, { merge: false });
                     }
