@@ -79,6 +79,14 @@
   window.FINNHUB_API_KEY = "d9dfuj1r01qj7sqcj440d9dfuj1r01qj7sqcj44g";
 </script>
 
+<!-- ================================================================
+     KRX Open API 키 — 국내 주식 조회의 마지막 수단(Naver→Yahoo 모두 실패 시).
+     POST + 사용자 지정 헤더 요청이라 브라우저 CORS에 많이 막힐 수 있습니다.
+     ================================================================ -->
+<script>
+  window.KRX_API_KEY = "BED8103976A34F87B1DABEC0A2AAF376586EF863";
+</script>
+
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
@@ -311,6 +319,73 @@ async function fetchNaverClose(code) {
         throw new Error("no usable price from Naver");
     return { date: todayStr(), close: price };
 }
+// KRX Open API — official exchange data, tried LAST (after Naver and Yahoo)
+// since it needs a personal AUTH_KEY (window.KRX_API_KEY, set in index.html)
+// and is a POST+custom-header request that's likely to hit CORS in the
+// browser. Tries a direct call first, then one proxy known to forward
+// method/headers, before giving up.
+const KRX_API_HOST = "https://data-dbg.krx.co.kr/svc/apis";
+async function fetchKRXClose(code, dateStr) {
+    const key = window.KRX_API_KEY;
+    if (!key)
+        throw new Error("KRX API 키가 설정되지 않았습니다");
+    const basDd = dateStr.replace(/-/g, "");
+    // KOSPI stock, KOSDAQ stock, then ETF (증권상품/ETP — a separate service
+    // that needs its own "이용 신청" on the KRX site, distinct from the two above)
+    const endpoints = ["/sto/stk_bydd_trd", "/sto/ksq_bydd_trd", "/etp/etf_bydd_trd"];
+    let lastErr;
+    for (const ep of endpoints) {
+        const url = KRX_API_HOST + ep;
+        const opts = {
+            method: "POST",
+            headers: { "AUTH_KEY": key, "Content-Type": "application/json", "Accept": "application/json" },
+            body: JSON.stringify({ basDd })
+        };
+        let res;
+        try {
+            res = await fetch(url, opts);
+        }
+        catch (e) {
+            // likely CORS — try once through a proxy that forwards method/headers/body
+            try {
+                res = await fetch("https://corsproxy.io/?url=" + encodeURIComponent(url), opts);
+            }
+            catch (e2) {
+                lastErr = new Error(`[KRX${ep}] 직접 실패(${e.message}), 프록시도 실패(${e2.message})`);
+                continue;
+            }
+        }
+        if (!res.ok) {
+            lastErr = new Error(`[KRX${ep}] HTTP ${res.status}`);
+            continue;
+        }
+        let data;
+        try {
+            data = await res.json();
+        }
+        catch (e) {
+            lastErr = new Error(`[KRX${ep}] 응답 파싱 실패`);
+            continue;
+        }
+        const rows = data.OutBlock_1 || data.outBlock1 || data.output || [];
+        const match = rows.find((r) => {
+            const c = r.ISU_SRT_CD || r.ISU_CD || r.isuSrtCd || r.isuCd || "";
+            return c === code || c.endsWith(code);
+        });
+        if (!match) {
+            lastErr = new Error(`[KRX${ep}] 종목 ${code} 없음`);
+            continue;
+        }
+        const rawClose = match.TDD_CLSPRC || match.tddClsprc || match.CLSPRC;
+        const close = parseFloat(String(rawClose).replace(/,/g, ""));
+        if (!close) {
+            lastErr = new Error(`[KRX${ep}] 종가 파싱 실패`);
+            continue;
+        }
+        return { date: dateStr, close };
+    }
+    throw lastErr || new Error("KRX 조회 실패");
+}
 async function fetchKoreanClose(code, dateStr) {
     let naverErr = null;
     if (dateStr === todayStr()) {
@@ -329,6 +404,16 @@ async function fetchKoreanClose(code, dateStr) {
             return await fetchYahooClose(code + ".KQ", dateStr);
         }
         catch (e2) {
+            // last resort: KRX official API (only if a key is configured)
+            if (window.KRX_API_KEY) {
+                try {
+                    return await fetchKRXClose(code, dateStr);
+                }
+                catch (e3) {
+                    const naverPart = naverErr ? `[Naver] ${naverErr.message} / ` : "";
+                    throw new Error(`${naverPart}${e.message} / ${e2.message} / ${e3.message}`);
+                }
+            }
             const naverPart = naverErr ? `[Naver] ${naverErr.message} / ` : "";
             throw new Error(`${naverPart}${e.message} / ${e2.message}`);
         }
