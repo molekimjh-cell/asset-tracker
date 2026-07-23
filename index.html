@@ -335,26 +335,32 @@ async function fetchKRXClose(code, dateStr) {
     const endpoints = ["/sto/stk_bydd_trd", "/sto/ksq_bydd_trd", "/etp/etf_bydd_trd"];
     let lastErr;
     for (const ep of endpoints) {
-        const url = KRX_API_HOST + ep;
-        const opts = {
-            method: "POST",
-            headers: { "AUTH_KEY": key, "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ basDd })
-        };
-        let res;
-        try {
-            res = await fetch(url, opts);
-        }
-        catch (e) {
-            // likely CORS — try once through a proxy that forwards method/headers/body
+        // Try both request styles seen in KRX's own docs/samples: GET with
+        // basDd as a query param, and POST with {"basDd": ...} as the JSON body.
+        const attempts = [
+            { url: `${KRX_API_HOST}${ep}?basDd=${basDd}`, opts: { method: "GET", headers: { "AUTH_KEY": key, "Accept": "application/json" } } },
+            { url: `${KRX_API_HOST}${ep}`, opts: { method: "POST", headers: { "AUTH_KEY": key, "Content-Type": "application/json", "Accept": "application/json" }, body: JSON.stringify({ basDd }) } }
+        ];
+        let res, gotResponse = false;
+        for (const attempt of attempts) {
             try {
-                res = await fetch("https://corsproxy.io/?url=" + encodeURIComponent(url), opts);
+                res = await fetch(attempt.url, attempt.opts);
+                gotResponse = true;
+                break;
             }
-            catch (e2) {
-                lastErr = new Error(`[KRX${ep}] 직접 실패(${e.message}), 프록시도 실패(${e2.message})`);
-                continue;
+            catch (e) {
+                try {
+                    res = await fetch("https://corsproxy.io/?url=" + encodeURIComponent(attempt.url), attempt.opts);
+                    gotResponse = true;
+                    break;
+                }
+                catch (e2) {
+                    lastErr = new Error(`[KRX${ep}] 직접 실패(${e.message}), 프록시도 실패(${e2.message})`);
+                }
             }
         }
+        if (!gotResponse)
+            continue;
         if (!res.ok) {
             lastErr = new Error(`[KRX${ep}] HTTP ${res.status}`);
             continue;
@@ -367,17 +373,16 @@ async function fetchKRXClose(code, dateStr) {
             lastErr = new Error(`[KRX${ep}] 응답 파싱 실패`);
             continue;
         }
-        const rows = data.OutBlock_1 || data.outBlock1 || data.output || [];
+        const rows = data.OutBlock_1 || [];
         const match = rows.find((r) => {
-            const c = r.ISU_SRT_CD || r.ISU_CD || r.isuSrtCd || r.isuCd || "";
+            const c = r.ISU_CD || "";
             return c === code || c.endsWith(code);
         });
         if (!match) {
             lastErr = new Error(`[KRX${ep}] 종목 ${code} 없음`);
             continue;
         }
-        const rawClose = match.TDD_CLSPRC || match.tddClsprc || match.CLSPRC;
-        const close = parseFloat(String(rawClose).replace(/,/g, ""));
+        const close = parseFloat(String(match.TDD_CLSPRC).replace(/,/g, ""));
         if (!close) {
             lastErr = new Error(`[KRX${ep}] 종가 파싱 실패`);
             continue;
