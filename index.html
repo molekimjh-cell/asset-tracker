@@ -319,6 +319,44 @@ async function fetchNaverClose(code) {
         throw new Error("no usable price from Naver");
     return { date: todayStr(), close: price };
 }
+// Naver's historical daily-chart endpoint — used for PAST dates (checkpoints),
+// since the polling endpoint above only gives the current/most-recent quote.
+// The response isn't strict JSON (uses single quotes), so it's cleaned up
+// before parsing. Shape: [["날짜","시가","고가","저가","종가","거래량","외국인소진율"], ["20260101", ...], ...]
+async function fetchNaverHistoricalClose(code, dateStr) {
+    const end = new Date(dateStr + "T00:00:00Z");
+    const start = new Date(end.getTime() - 20 * 86400000); // 20-day window to cross weekends/holidays
+    const fmt = (d) => d.toISOString().slice(0, 10).replace(/-/g, "");
+    const url = `https://fchart.stock.naver.com/siseJson.nhn?symbol=${code}&requestType=1&startTime=${fmt(start)}&endTime=${fmt(end)}&timeframe=day`;
+    let res;
+    try {
+        res = await fetch(url);
+        if (!res.ok)
+            throw new Error("HTTP " + res.status);
+    }
+    catch (e) {
+        res = await fetchViaProxies(url);
+    }
+    let text = await res.text();
+    text = text.replace(/'/g, '"');
+    let rows;
+    try {
+        rows = JSON.parse(text);
+    }
+    catch (e) {
+        throw new Error("Naver 과거시세 응답 파싱 실패");
+    }
+    const dataRows = (rows || []).slice(1).filter((r) => Array.isArray(r) && r.length >= 5 && r[0]);
+    if (!dataRows.length)
+        throw new Error("Naver 과거시세 데이터 없음");
+    const last = dataRows[dataRows.length - 1];
+    const close = parseFloat(last[4]);
+    if (!close || isNaN(close))
+        throw new Error("Naver 과거시세 종가 파싱 실패");
+    const raw = String(last[0]);
+    const foundDate = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+    return { date: foundDate, close };
+}
 // KRX Open API — official exchange data, tried LAST (after Naver and Yahoo)
 // since it needs a personal AUTH_KEY (window.KRX_API_KEY, set in index.html)
 // and is a POST+custom-header request that's likely to hit CORS in the
@@ -393,13 +431,16 @@ async function fetchKRXClose(code, dateStr) {
 }
 async function fetchKoreanClose(code, dateStr) {
     let naverErr = null;
-    if (dateStr === todayStr()) {
-        try {
+    try {
+        if (dateStr === todayStr()) {
             return await fetchNaverClose(code);
         }
-        catch (e) {
-            naverErr = e; // fall through to Yahoo below, but remember why Naver failed
+        else {
+            return await fetchNaverHistoricalClose(code, dateStr);
         }
+    }
+    catch (e) {
+        naverErr = e; // fall through to Yahoo below, but remember why Naver failed
     }
     try {
         return await fetchYahooClose(code + ".KS", dateStr);
