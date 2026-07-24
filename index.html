@@ -80,11 +80,20 @@
 </script>
 
 <!-- ================================================================
-     KRX Open API 키 — 국내 주식 조회의 마지막 수단(Naver→Yahoo 모두 실패 시).
-     POST + 사용자 지정 헤더 요청이라 브라우저 CORS에 많이 막힐 수 있습니다.
+     [1] 개인 프록시 주소 — 국내 종목 조회의 핵심 설정.
+     Cloudflare Worker(worker/worker.js)를 배포한 뒤 그 주소를 넣으세요.
+     비워두면 공개 CORS 프록시로 동작하지만 실패가 잦고 KRX는 못 씁니다.
      ================================================================ -->
 <script>
-  window.KRX_API_KEY = "BED8103976A34F87B1DABEC0A2AAF376586EF863";
+  window.KR_PROXY_BASE = ""; // 예: "https://kr-quote-proxy.내계정.workers.dev"
+</script>
+
+<!-- ================================================================
+     [2] KRX Open API 키 — 위 프록시를 쓰면 여기 둘 필요 없습니다
+     (워커 시크릿 KRX_AUTH_KEY 로 옮기고 아래는 빈 문자열로 두세요).
+     ================================================================ -->
+<script>
+  window.KRX_API_KEY = "";
 </script>
 
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -225,335 +234,577 @@ function dateRange(startStr, endStr) {
 function tickInterval(len) {
     return Math.max(0, Math.ceil(len / 10) - 1);
 }
-// ---------- FREE public-API lookup (no Claude tokens) ----------
-// Yahoo Finance's unofficial chart endpoint (via CORS proxies) for prices,
-// and open.er-api.com / Frankfurter for FX.
+// ================================================================
+// 시세 조회 모듈 v2 (국내 종목 조회 안정화)
+// ----------------------------------------------------------------
+// v1이 국내 종목에서 계속 실패했던 이유:
+//  1) Naver 과거시세 주소(fchart.stock.naver.com/siseJson.nhn)가 폐기됨
+//  2) Naver / KRX 모두 CORS 헤더를 안 주므로 브라우저 직접 호출 불가.
+//     공개 CORS 프록시는 헤더를 전달하지 않아 KRX의 AUTH_KEY가 유실되고,
+//     레이트리밋/다운도 잦아 "될 때도 있고 안 될 때도 있는" 증상이 남음
+//  3) 하나의 날짜만 조회 → 휴장일/공휴일이면 그냥 실패
+//  4) KRX 응답이 시장 전체(수백~수천 건)인데 종목마다 새로 받아옴
+//
+// v2에서 바뀐 점:
+//  - window.KR_PROXY_BASE (개인 Cloudflare Worker) 지원 → CORS/헤더 문제 소멸
+//  - Naver 일봉 엔드포인트 3종 자동 폴백 + 관대한 파서
+//  - 거래일 후보를 뒤로 최대 12일 탐색 (휴장일 자동 회피)
+//  - KRX 일별 데이터 메모리 캐시 + 종목→시장 캐시 (호출 수 대폭 감소)
+//  - window.krDiag(code) 진단 함수 제공
+// ================================================================
+
+// ---- 설정 읽기 ----
+function krProxyBase() {
+  var b = (typeof window !== "undefined" && window.KR_PROXY_BASE) || "";
+  return String(b).replace(/\/+$/, "");
+}
+function hasKrProxy() { return !!krProxyBase(); }
+function krxKey() { return (typeof window !== "undefined" && window.KRX_API_KEY) || ""; }
+
+// ---- 공개 CORS 프록시 (개인 프록시가 없을 때만 쓰는 비상용) ----
 const CORS_PROXIES = [
-    (url) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(url),
-    (url) => "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(url),
-    (url) => "https://corsproxy.io/?url=" + encodeURIComponent(url),
-    (url) => "https://proxy.corsfix.com/?" + url
+  (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+  (u) => "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(u),
+  (u) => "https://corsproxy.io/?url=" + encodeURIComponent(u),
+  (u) => "https://proxy.corsfix.com/?" + u
 ];
+
+function fetchWithTimeout(url, opts, ms) {
+  opts = opts || {};
+  ms = ms || 10000;
+  if (typeof AbortController === "undefined") return fetch(url, opts);
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  const merged = {};
+  for (const k in opts) merged[k] = opts[k];
+  merged.signal = ac.signal;
+  return fetch(url, merged).finally(() => clearTimeout(t));
+}
+
+function errText(e) {
+  if (!e) return "알 수 없는 오류";
+  if (e.name === "AbortError") return "타임아웃";
+  return e.message || String(e);
+}
+
+async function fetchTextViaProxies(url) {
+  const errs = [];
+  for (let i = 0; i < CORS_PROXIES.length; i++) {
+    try {
+      const res = await fetchWithTimeout(CORS_PROXIES[i](url));
+      if (!res.ok) { errs.push("프록시" + (i + 1) + ":HTTP" + res.status); continue; }
+      const text = await res.text();
+      if (!text || !text.trim()) { errs.push("프록시" + (i + 1) + ":빈응답"); continue; }
+      return text;
+    } catch (e) {
+      errs.push("프록시" + (i + 1) + ":" + errText(e));
+    }
+  }
+  throw new Error("공개 프록시 전부 실패 [" + errs.join(", ") + "]");
+}
+
+// 직접 호출 → 실패하면 공개 프록시. 본문을 text로 돌려준다.
+async function fetchTextSmart(url) {
+  try {
+    const r = await fetchWithTimeout(url);
+    if (r.ok) {
+      const t = await r.text();
+      if (t && t.trim()) return t;
+    }
+  } catch (e) { /* CORS 등 → 프록시로 */ }
+  return await fetchTextViaProxies(url);
+}
+
+// 기존 코드 호환용(Yahoo/FX 쪽에서 Response 객체를 기대함)
 async function fetchViaProxies(url) {
-    const attempts = [];
-    for (let i = 0; i < CORS_PROXIES.length; i++) {
-        try {
-            const res = await fetch(CORS_PROXIES[i](url));
-            if (res.ok)
-                return res;
-            attempts.push(`프록시${i + 1}: HTTP ${res.status}`);
-        }
-        catch (e) {
-            attempts.push(`프록시${i + 1}: ${e.message}`);
-        }
+  const errs = [];
+  for (let i = 0; i < CORS_PROXIES.length; i++) {
+    try {
+      const res = await fetchWithTimeout(CORS_PROXIES[i](url));
+      if (res.ok) return res;
+      errs.push("프록시" + (i + 1) + ": HTTP " + res.status);
+    } catch (e) {
+      errs.push("프록시" + (i + 1) + ": " + errText(e));
     }
-    throw new Error("모든 프록시 실패 [" + attempts.join(" / ") + "]");
+  }
+  throw new Error("모든 프록시 실패 [" + errs.join(" / ") + "]");
 }
+
+// ---- 날짜 유틸 ----
+function krCompact(dateStr) { return String(dateStr).replace(/-/g, ""); }
+function krShiftDays(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+// 주말을 건너뛴 "거래일 후보" 목록(요청일부터 과거로). 공휴일은 데이터가
+// 비어있는 것으로 판별하므로 여기서 걸러내지 않는다.
+function krCandidateDays(dateStr, back) {
+  back = back || 12;
+  const out = [];
+  let d = dateStr;
+  for (let i = 0; i < back && out.length < 8; i++) {
+    const dow = new Date(d + "T00:00:00Z").getUTCDay();
+    if (dow !== 0 && dow !== 6) out.push(d);
+    d = krShiftDays(d, -1);
+  }
+  return out;
+}
+
+// 국내 종목코드 판별: 6자리(숫자 또는 숫자+영문 혼합, 예: 005930 / 0019K0)
 function isKoreanTicker(ticker) {
-    // Korean codes are usually 6 digits, but some security types (warrants,
-    // certain funds/ETNs) mix in letters (e.g. "0019K0") — require at least one
-    // digit so this still excludes typical all-letter US tickers like "AAPL".
-    return /^(?=.*\d)[0-9A-Za-z]{5,6}$/.test(ticker);
+  return /^(?=.*\d)[0-9A-Za-z]{6}$/.test(String(ticker || "").trim());
 }
+
+function toNum(v) {
+  if (v === null || v === undefined) return NaN;
+  if (typeof v === "number") return v;
+  return parseFloat(String(v).replace(/,/g, "").trim());
+}
+function pickNum(obj, keys) {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null) {
+      const n = toNum(obj[k]);
+      if (isFinite(n) && n > 0) return n;
+    }
+  }
+  return NaN;
+}
+
+// ================================================================
+// 1) Naver 실시간 시세 (오늘/최근 종가)
+//    https://polling.finance.naver.com/api/realtime/domestic/stock/005930
+//    - 콤마로 여러 종목 동시 조회 가능 → 포트폴리오 배치 조회에 사용
+// ================================================================
+async function krNaverQuote(codes) {
+  const list = (Array.isArray(codes) ? codes : [codes]).join(",");
+  let text;
+  if (hasKrProxy()) {
+    const r = await fetchWithTimeout(krProxyBase() + "/naver/quote?codes=" + encodeURIComponent(list));
+    if (!r.ok) throw new Error("[Naver 실시간] 프록시 HTTP " + r.status);
+    text = await r.text();
+  } else {
+    text = await fetchTextSmart("https://polling.finance.naver.com/api/realtime/domestic/stock/" + encodeURIComponent(list));
+  }
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) { throw new Error("[Naver 실시간] 응답 파싱 실패"); }
+
+  // 신형: { datas: [...] }  / 구형: { result: { areas: [{ datas: [...] }] } }
+  let rows = (data && data.datas) || null;
+  if (!rows && data && data.result && data.result.areas && data.result.areas[0]) {
+    rows = data.result.areas[0].datas;
+  }
+  if (!Array.isArray(rows) || !rows.length) throw new Error("[Naver 실시간] 데이터 없음");
+
+  const asked = Array.isArray(codes) ? codes : [codes];
+  const out = {};
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    // 응답의 코드 필드명이 바뀌어도 죽지 않도록: 요청 순서로 위치 매칭까지 폴백
+    let code = String(row.itemCode || row.cd || row.code || row.reutersCode || "").trim();
+    if (code.length > 6) code = code.slice(-6);
+    if (!code && asked[i]) code = asked[i];
+    const close = pickNum(row, ["closePrice", "nv", "currentPrice", "tradePrice", "close"]);
+    if (!code || !isFinite(close)) continue;
+    const traded = row.localTradedAt || row.tradedAt || "";
+    const date = /^\d{4}-\d{2}-\d{2}/.test(traded) ? traded.slice(0, 10) : todayStr();
+    out[code] = { date: date, close: close, source: "Naver 실시간" };
+  }
+  if (!Object.keys(out).length) throw new Error("[Naver 실시간] 가격 파싱 실패");
+  return out;
+}
+
+// ================================================================
+// 2) Naver 일봉(과거 종가)
+//    구 fchart.stock.naver.com/siseJson.nhn 은 폐기 → 아래 순서로 폴백
+// ================================================================
+const NAVER_CHART_URLS = [
+  (c, s, e) => "https://m.stock.naver.com/front-api/external/chart/domestic/info?symbol=" + c + "&requestType=1&startTime=" + s + "&endTime=" + e + "&timeframe=day",
+  (c, s, e) => "https://api.finance.naver.com/siseJson.naver?symbol=" + c + "&requestType=1&startTime=" + s + "&endTime=" + e + "&timeframe=day",
+  (c, s, e) => "https://fchart.stock.naver.com/siseJson.nhn?symbol=" + c + "&requestType=1&startTime=" + s + "&endTime=" + e + "&timeframe=day"
+];
+
+// 응답이 정규 JSON이 아니다(홑따옴표, 후행 콤마, 앞쪽 잡문자, 혹은
+// {"isSuccess":true,"result":[...]} 래핑). 전부 관대하게 처리한다.
+function parseNaverSeries(text) {
+  if (!text || !text.trim()) throw new Error("빈 응답");
+  let t = text.replace(/^\uFEFF/, "").trim();
+
+  if (t.charAt(0) === "{") {
+    try {
+      const o = JSON.parse(t);
+      if (Array.isArray(o.result)) return normalizeNaverSeries(o.result);
+      if (typeof o.result === "string") t = o.result;
+      else if (o.isSuccess === false) throw new Error("Naver 오류: " + (o.message || o.detailCode || "unknown"));
+    } catch (e) {
+      if (/Naver 오류/.test(e.message)) throw e;
+    }
+  }
+  const i = t.indexOf("[");
+  const j = t.lastIndexOf("]");
+  if (i < 0 || j <= i) throw new Error("배열 형태 아님");
+  t = t.slice(i, j + 1)
+    .replace(/[\r\n\t]/g, "")
+    .replace(/'/g, '"')
+    .replace(/,\s*]/g, "]");
+  let rows;
+  try { rows = JSON.parse(t); }
+  catch (e) { throw new Error("일봉 파싱 실패"); }
+  return normalizeNaverSeries(rows);
+}
+
+function normalizeNaverSeries(rows) {
+  const out = [];
+  for (const r of (rows || [])) {
+    if (!Array.isArray(r) || r.length < 5) continue;
+    const raw = String(r[0]).replace(/-/g, "").trim();
+    if (!/^\d{8}$/.test(raw)) continue; // 헤더행("날짜","시가"...) 제거
+    const close = toNum(r[4]);
+    if (!isFinite(close) || close <= 0) continue;
+    out.push({ date: raw.slice(0, 4) + "-" + raw.slice(4, 6) + "-" + raw.slice(6, 8), close: close });
+  }
+  out.sort((a, b) => (a.date < b.date ? -1 : 1));
+  if (!out.length) throw new Error("유효한 일봉 없음");
+  return out;
+}
+
+function pickOnOrBefore(series, dateStr) {
+  let best = null;
+  for (const row of series) if (row.date <= dateStr) best = row;
+  if (!best) best = series[series.length - 1]; // 요청일보다 전 데이터가 없으면 가장 최근
+  return { date: best.date, close: best.close, source: "Naver 일봉" };
+}
+
+async function krNaverHistory(code, dateStr) {
+  const end = krCompact(dateStr);
+  const start = krCompact(krShiftDays(dateStr, -40)); // 연휴 대비 넉넉히
+  const errs = [];
+
+  if (hasKrProxy()) {
+    try {
+      const r = await fetchWithTimeout(krProxyBase() + "/naver/chart?symbol=" + encodeURIComponent(code) + "&start=" + start + "&end=" + end, {}, 15000);
+      if (!r.ok) throw new Error("프록시 HTTP " + r.status);
+      return pickOnOrBefore(parseNaverSeries(await r.text()), dateStr);
+    } catch (e) { errs.push("프록시:" + errText(e)); }
+  }
+  for (let i = 0; i < NAVER_CHART_URLS.length; i++) {
+    try {
+      const text = await fetchTextSmart(NAVER_CHART_URLS[i](code, start, end));
+      return pickOnOrBefore(parseNaverSeries(text), dateStr);
+    } catch (e) { errs.push("chart" + (i + 1) + ":" + errText(e)); }
+  }
+  throw new Error("[Naver 일봉] " + errs.join(" / "));
+}
+
+// ================================================================
+// 3) KRX Open API (공식·정확하지만 T-1 이전 데이터만, CORS 때문에
+//    개인 프록시 없이는 브라우저에서 사실상 호출 불가)
+// ================================================================
+const KRX_MARKETS = [
+  { key: "stk", path: "sto/stk_bydd_trd", label: "KOSPI" },
+  { key: "ksq", path: "sto/ksq_bydd_trd", label: "KOSDAQ" },
+  { key: "etf", path: "etp/etf_bydd_trd", label: "ETF" }
+];
+const _krxDayCache = new Map();   // "stk:20260722" -> Map(code -> row)
+const _krxMarketOf = new Map();   // "005930" -> "stk"
+
+async function krxDay(marketKey, basDd) {
+  const ck = marketKey + ":" + basDd;
+  if (_krxDayCache.has(ck)) return _krxDayCache.get(ck);
+
+  const m = KRX_MARKETS.find((x) => x.key === marketKey);
+  let json;
+  if (hasKrProxy()) {
+    const r = await fetchWithTimeout(krProxyBase() + "/krx/daily?market=" + marketKey + "&basDd=" + basDd, {}, 25000);
+    if (!r.ok) throw new Error("[KRX " + m.label + "] 프록시 HTTP " + r.status + " " + (await r.text()).slice(0, 120));
+    json = await r.json();
+  } else {
+    const key = krxKey();
+    if (!key) throw new Error("[KRX] 인증키 없음");
+    // 커스텀 헤더(AUTH_KEY) 때문에 preflight가 발생하는데 KRX는 CORS 헤더를
+    // 주지 않는다 → 브라우저에서는 거의 항상 실패한다. 그래도 한 번은 시도.
+    const r = await fetchWithTimeout(
+      "https://data-dbg.krx.co.kr/svc/apis/" + m.path + "?basDd=" + basDd,
+      { headers: { AUTH_KEY: key, Accept: "application/json" } },
+      25000
+    );
+    if (!r.ok) throw new Error("[KRX " + m.label + "] HTTP " + r.status);
+    json = await r.json();
+  }
+
+  const map = new Map();
+  const rows = (json && json.OutBlock_1) || [];
+  for (const row of rows) {
+    const c = String(row.ISU_CD || row.ISU_SRT_CD || "").trim();
+    if (!c) continue;
+    map.set(c, row);
+    // 표준코드(KR7005930003) 형태면 단축코드(005930)도 키로 등록
+    if (c.length === 12) map.set(c.slice(3, 9), row);
+  }
+  _krxDayCache.set(ck, map);
+  return map;
+}
+
+async function krxClose(code, dateStr) {
+  if (!hasKrProxy() && !krxKey()) throw new Error("[KRX] 사용 불가(키/프록시 없음)");
+  const days = krCandidateDays(dateStr, 12);
+  const known = _krxMarketOf.get(code);
+  const order = known
+    ? [known].concat(KRX_MARKETS.map((m) => m.key).filter((k) => k !== known))
+    : KRX_MARKETS.map((m) => m.key);
+  const errs = [];
+
+  for (const d of days) {
+    const basDd = krCompact(d);
+    let sawData = false;
+    for (const k of order) {
+      let map;
+      try { map = await krxDay(k, basDd); }
+      catch (e) { errs.push(errText(e)); continue; }
+      if (map.size) sawData = true;
+      const row = map.get(code);
+      if (row) {
+        _krxMarketOf.set(code, k);
+        const close = toNum(row.TDD_CLSPRC);
+        if (isFinite(close) && close > 0) {
+          const label = (KRX_MARKETS.find((m) => m.key === k) || {}).label;
+          return { date: d, close: close, source: "KRX " + label };
+        }
+      }
+      if (known) break; // 시장을 이미 아는 종목이면 다른 시장은 볼 필요 없음
+    }
+    if (sawData && !known) {
+      errs.push(d + " 기준 3개 시장 어디에도 " + code + " 없음");
+      break; // 거래일 데이터는 받았는데 종목이 없다 → 날짜를 더 뒤로 가도 소용없음
+    }
+  }
+  throw new Error("[KRX] 조회 실패" + (errs.length ? " (" + errs.slice(0, 3).join(" / ") + ")" : ""));
+}
+
+// ================================================================
+// 4) Yahoo Finance (해외 종목의 기본 경로 / 국내는 최후 폴백)
+// ================================================================
+const _yahooSuffixOf = new Map(); // "005930" -> ".KS"
+
 async function fetchYahooClose(yTicker, dateStr) {
-    const isToday = dateStr === todayStr();
-    const target = new Date(dateStr + "T00:00:00Z");
-    const period1 = Math.floor(target.getTime() / 1000) - 9 * 86400;
-    const period2 = isToday ? Math.floor(Date.now() / 1000) : Math.floor(target.getTime() / 1000) + 4 * 86400;
-    const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yTicker)}?period1=${period1}&period2=${period2}&interval=1d`;
-    let res;
+  const isToday = dateStr === todayStr();
+  const target = new Date(dateStr + "T00:00:00Z");
+  const period1 = Math.floor(target.getTime() / 1000) - 20 * 86400;
+  const period2 = isToday ? Math.floor(Date.now() / 1000) : Math.floor(target.getTime() / 1000) + 4 * 86400;
+  const path = "/v8/finance/chart/" + encodeURIComponent(yTicker) + "?period1=" + period1 + "&period2=" + period2 + "&interval=1d";
+
+  let text = null;
+  if (hasKrProxy()) {
     try {
-        res = await fetch(yahooUrl);
-        if (!res.ok)
-            throw new Error("HTTP " + res.status);
-    }
-    catch (e) {
-        try {
-            res = await fetchViaProxies(yahooUrl);
-        }
-        catch (proxyErr) {
-            throw new Error(`[Yahoo:${yTicker}] 직접 요청 실패(${e.message}), ${proxyErr.message}`);
-        }
-    }
-    const data = await res.json();
-    const result = data.chart && data.chart.result && data.chart.result[0];
-    if (!result || !result.timestamp) {
-        const err = data.chart && data.chart.error;
-        throw new Error(`[Yahoo:${yTicker}] 데이터 없음` + (err ? ` (${err.description || err.code})` : ""));
-    }
-    const timestamps = result.timestamp;
-    const closes = (result.indicators.quote && result.indicators.quote[0].close) || [];
-    let bestIdx = -1;
-    for (let i = 0; i < timestamps.length; i++) {
-        if (closes[i] == null)
-            continue;
-        const d = new Date(timestamps[i] * 1000).toISOString().slice(0, 10);
-        if (isToday || d <= dateStr)
-            bestIdx = i;
-    }
-    if (bestIdx === -1)
-        throw new Error(`[Yahoo:${yTicker}] 사용 가능한 종가 없음`);
-    const resolvedDate = new Date(timestamps[bestIdx] * 1000).toISOString().slice(0, 10);
-    return { date: resolvedDate, close: closes[bestIdx] };
-}
-// Naver Finance's public polling endpoint often works better for Korean
-// tickers than routing Yahoo through a proxy. Response shape isn't officially
-// documented, so this is defensive: any mismatch just falls through silently
-// to the Yahoo-based fetchKoreanClose below (no regression risk).
-async function fetchNaverClose(code) {
-    var _a, _b, _c;
-    const url = `https://polling.finance.naver.com/api/realtime/domestic/stock/${code}`;
-    let res;
+      const r = await fetchWithTimeout(krProxyBase() + "/yahoo/chart?path=" + encodeURIComponent(path), {}, 15000);
+      if (r.ok) text = await r.text();
+    } catch (e) { /* 아래 일반 경로로 */ }
+  }
+  if (text === null) {
+    const yahooUrl = "https://query1.finance.yahoo.com" + path;
     try {
-        res = await fetch(url);
-        if (!res.ok)
-            throw new Error("HTTP " + res.status);
+      const r = await fetchWithTimeout(yahooUrl);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      text = await r.text();
+    } catch (e) {
+      try { text = await fetchTextViaProxies(yahooUrl); }
+      catch (pe) { throw new Error("[Yahoo:" + yTicker + "] 직접 실패(" + errText(e) + "), " + pe.message); }
     }
-    catch (e) {
-        res = await fetchViaProxies(url);
-    }
-    const data = await res.json();
-    const item = data && data.datas && data.datas[0];
-    if (!item)
-        throw new Error("no data from Naver");
-    const raw = (_c = (_b = (_a = item.closePrice) !== null && _a !== void 0 ? _a : item.close) !== null && _b !== void 0 ? _b : item.tradePrice) !== null && _c !== void 0 ? _c : item.currentPrice;
-    const price = typeof raw === "number" ? raw : parseFloat(String(raw).replace(/,/g, ""));
-    if (!price || isNaN(price))
-        throw new Error("no usable price from Naver");
-    return { date: todayStr(), close: price };
+  }
+
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) { throw new Error("[Yahoo:" + yTicker + "] 응답 파싱 실패"); }
+
+  const result = data.chart && data.chart.result && data.chart.result[0];
+  if (!result || !result.timestamp) {
+    const err = data.chart && data.chart.error;
+    throw new Error("[Yahoo:" + yTicker + "] 데이터 없음" + (err ? " (" + (err.description || err.code) + ")" : ""));
+  }
+  const timestamps = result.timestamp;
+  const closes = (result.indicators.quote && result.indicators.quote[0].close) || [];
+  let bestIdx = -1;
+  for (let i = 0; i < timestamps.length; i++) {
+    if (closes[i] == null) continue;
+    const d = new Date(timestamps[i] * 1000).toISOString().slice(0, 10);
+    if (isToday || d <= dateStr) bestIdx = i;
+  }
+  if (bestIdx === -1) throw new Error("[Yahoo:" + yTicker + "] 사용 가능한 종가 없음");
+  return {
+    date: new Date(timestamps[bestIdx] * 1000).toISOString().slice(0, 10),
+    close: closes[bestIdx],
+    source: "Yahoo " + yTicker
+  };
 }
-// Naver's historical daily-chart endpoint — used for PAST dates (checkpoints),
-// since the polling endpoint above only gives the current/most-recent quote.
-// The response isn't strict JSON (uses single quotes), so it's cleaned up
-// before parsing. Shape: [["날짜","시가","고가","저가","종가","거래량","외국인소진율"], ["20260101", ...], ...]
-async function fetchNaverHistoricalClose(code, dateStr) {
-    const end = new Date(dateStr + "T00:00:00Z");
-    const start = new Date(end.getTime() - 20 * 86400000); // 20-day window to cross weekends/holidays
-    const fmt = (d) => d.toISOString().slice(0, 10).replace(/-/g, "");
-    const url = `https://fchart.stock.naver.com/siseJson.nhn?symbol=${code}&requestType=1&startTime=${fmt(start)}&endTime=${fmt(end)}&timeframe=day`;
-    let res;
-    try {
-        res = await fetch(url);
-        if (!res.ok)
-            throw new Error("HTTP " + res.status);
-    }
-    catch (e) {
-        res = await fetchViaProxies(url);
-    }
-    let text = await res.text();
-    text = text.replace(/'/g, '"');
-    let rows;
-    try {
-        rows = JSON.parse(text);
-    }
-    catch (e) {
-        throw new Error("Naver 과거시세 응답 파싱 실패");
-    }
-    const dataRows = (rows || []).slice(1).filter((r) => Array.isArray(r) && r.length >= 5 && r[0]);
-    if (!dataRows.length)
-        throw new Error("Naver 과거시세 데이터 없음");
-    const last = dataRows[dataRows.length - 1];
-    const close = parseFloat(last[4]);
-    if (!close || isNaN(close))
-        throw new Error("Naver 과거시세 종가 파싱 실패");
-    const raw = String(last[0]);
-    const foundDate = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
-    return { date: foundDate, close };
-}
-// KRX Open API — official exchange data, tried LAST (after Naver and Yahoo)
-// since it needs a personal AUTH_KEY (window.KRX_API_KEY, set in index.html)
-// and is a POST+custom-header request that's likely to hit CORS in the
-// browser. Tries a direct call first, then one proxy known to forward
-// method/headers, before giving up.
-const KRX_API_HOST = "https://data-dbg.krx.co.kr/svc/apis";
-async function fetchKRXClose(code, dateStr) {
-    const key = window.KRX_API_KEY;
-    if (!key)
-        throw new Error("KRX API 키가 설정되지 않았습니다");
-    const basDd = dateStr.replace(/-/g, "");
-    // KOSPI stock, KOSDAQ stock, then ETF (증권상품/ETP — a separate service
-    // that needs its own "이용 신청" on the KRX site, distinct from the two above)
-    const endpoints = ["/sto/stk_bydd_trd", "/sto/ksq_bydd_trd", "/etp/etf_bydd_trd"];
-    let lastErr;
-    for (const ep of endpoints) {
-        // Try both request styles seen in KRX's own docs/samples: GET with
-        // basDd as a query param, and POST with {"basDd": ...} as the JSON body.
-        const attempts = [
-            { url: `${KRX_API_HOST}${ep}?basDd=${basDd}`, opts: { method: "GET", headers: { "AUTH_KEY": key, "Accept": "application/json" } } },
-            { url: `${KRX_API_HOST}${ep}`, opts: { method: "POST", headers: { "AUTH_KEY": key, "Content-Type": "application/json", "Accept": "application/json" }, body: JSON.stringify({ basDd }) } }
-        ];
-        let res, gotResponse = false;
-        for (const attempt of attempts) {
-            try {
-                res = await fetch(attempt.url, attempt.opts);
-                gotResponse = true;
-                break;
-            }
-            catch (e) {
-                try {
-                    res = await fetch("https://corsproxy.io/?url=" + encodeURIComponent(attempt.url), attempt.opts);
-                    gotResponse = true;
-                    break;
-                }
-                catch (e2) {
-                    lastErr = new Error(`[KRX${ep}] 직접 실패(${e.message}), 프록시도 실패(${e2.message})`);
-                }
-            }
-        }
-        if (!gotResponse)
-            continue;
-        if (!res.ok) {
-            lastErr = new Error(`[KRX${ep}] HTTP ${res.status}`);
-            continue;
-        }
-        let data;
-        try {
-            data = await res.json();
-        }
-        catch (e) {
-            lastErr = new Error(`[KRX${ep}] 응답 파싱 실패`);
-            continue;
-        }
-        const rows = data.OutBlock_1 || [];
-        const match = rows.find((r) => {
-            const c = r.ISU_CD || "";
-            return c === code || c.endsWith(code);
-        });
-        if (!match) {
-            lastErr = new Error(`[KRX${ep}] 종목 ${code} 없음`);
-            continue;
-        }
-        const close = parseFloat(String(match.TDD_CLSPRC).replace(/,/g, ""));
-        if (!close) {
-            lastErr = new Error(`[KRX${ep}] 종가 파싱 실패`);
-            continue;
-        }
-        return { date: dateStr, close };
-    }
-    throw lastErr || new Error("KRX 조회 실패");
-}
+
+// ================================================================
+// 국내 종목 통합 조회 (Naver → KRX → Yahoo)
+// ================================================================
 async function fetchKoreanClose(code, dateStr) {
-    let naverErr = null;
+  const errs = [];
+  const today = todayStr();
+
+  // (1) 오늘이면 Naver 실시간이 가장 빠르고 정확
+  if (dateStr >= today) {
     try {
-        if (dateStr === todayStr()) {
-            return await fetchNaverClose(code);
-        }
-        else {
-            return await fetchNaverHistoricalClose(code, dateStr);
-        }
-    }
-    catch (e) {
-        naverErr = e; // fall through to Yahoo below, but remember why Naver failed
-    }
+      const q = await krNaverQuote([code]);
+      if (q[code]) return q[code];
+      errs.push("[Naver 실시간] " + code + " 응답에 없음");
+    } catch (e) { errs.push(errText(e)); }
+  }
+
+  // (2) Naver 일봉 — 과거/오늘 모두 커버
+  try { return await krNaverHistory(code, dateStr); }
+  catch (e) { errs.push(errText(e)); }
+
+  // (3) KRX 공식 (프록시가 있으면 여기서 거의 항상 성공)
+  if (hasKrProxy() || krxKey()) {
+    try { return await krxClose(code, dateStr); }
+    catch (e) { errs.push(errText(e)); }
+  }
+
+  // (4) Yahoo .KS / .KQ
+  const known = _yahooSuffixOf.get(code);
+  const suffixes = known ? [known, known === ".KS" ? ".KQ" : ".KS"] : [".KS", ".KQ"];
+  for (const sfx of suffixes) {
     try {
-        return await fetchYahooClose(code + ".KS", dateStr);
-    }
-    catch (e) {
-        try {
-            return await fetchYahooClose(code + ".KQ", dateStr);
-        }
-        catch (e2) {
-            // last resort: KRX official API (only if a key is configured)
-            if (window.KRX_API_KEY) {
-                try {
-                    return await fetchKRXClose(code, dateStr);
-                }
-                catch (e3) {
-                    const naverPart = naverErr ? `[Naver] ${naverErr.message} / ` : "";
-                    throw new Error(`${naverPart}${e.message} / ${e2.message} / ${e3.message}`);
-                }
-            }
-            const naverPart = naverErr ? `[Naver] ${naverErr.message} / ` : "";
-            throw new Error(`${naverPart}${e.message} / ${e2.message}`);
-        }
-    }
+      const r = await fetchYahooClose(code + sfx, dateStr);
+      _yahooSuffixOf.set(code, sfx);
+      return r;
+    } catch (e) { errs.push(errText(e)); }
+  }
+
+  throw new Error(errs.join(" / "));
 }
-// Finnhub genuinely supports CORS for direct browser calls (no proxy needed),
-// unlike Yahoo — used as the first attempt for TODAY's price on non-Korean
-// tickers when a free API key is configured (window.FINNHUB_API_KEY, set in
-// index.html). Falls back to Yahoo+proxies if no key, rate-limited, or the
-// ticker isn't covered (Finnhub's free tier is US-market only).
+
+// ================================================================
+// Finnhub (해외 오늘 시세, CORS 허용됨)
+// ================================================================
 async function fetchFinnhubQuote(ticker) {
-    const key = window.FINNHUB_API_KEY;
-    if (!key)
-        throw new Error("no Finnhub key configured");
-    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${key}`);
-    if (!res.ok)
-        throw new Error("Finnhub HTTP " + res.status);
-    const data = await res.json();
-    if (!data || !data.c)
-        throw new Error("Finnhub: no price for " + ticker);
-    return Number(data.c);
+  const key = typeof window !== "undefined" && window.FINNHUB_API_KEY;
+  if (!key) throw new Error("Finnhub 키 없음");
+  const res = await fetchWithTimeout("https://finnhub.io/api/v1/quote?symbol=" + encodeURIComponent(ticker) + "&token=" + key);
+  if (!res.ok) throw new Error("Finnhub HTTP " + res.status);
+  const data = await res.json();
+  if (!data || !data.c) throw new Error("Finnhub: " + ticker + " 가격 없음");
+  return Number(data.c);
 }
+
+// ================================================================
+// 환율 (USD/KRW)
+// ================================================================
 async function freeFxRate(dateStr) {
-    const isToday = dateStr === todayStr();
-    if (isToday) {
-        try {
-            const r = await fetch("https://open.er-api.com/v6/latest/USD");
-            if (r.ok) {
-                const d = await r.json();
-                const fx = d.rates && d.rates.KRW;
-                if (fx)
-                    return { date: dateStr, fx: Number(fx) };
-            }
-        }
-        catch (e) { /* fall through to Frankfurter */ }
-    }
-    const url = isToday
-        ? `https://api.frankfurter.app/latest?from=USD&to=KRW`
-        : `https://api.frankfurter.app/${dateStr}?from=USD&to=KRW`;
-    let res;
+  const isToday = dateStr === todayStr();
+  if (isToday) {
     try {
-        res = await fetch(url);
-        if (!res.ok)
-            throw new Error("HTTP " + res.status);
-    }
-    catch (e) {
+      const r = await fetchWithTimeout("https://open.er-api.com/v6/latest/USD");
+      if (r.ok) {
+        const d = await r.json();
+        const fx = d.rates && d.rates.KRW;
+        if (fx) return { date: dateStr, fx: Number(fx) };
+      }
+    } catch (e) { /* 다음 소스로 */ }
+  }
+  const url = isToday
+    ? "https://api.frankfurter.app/latest?from=USD&to=KRW"
+    : "https://api.frankfurter.app/" + dateStr + "?from=USD&to=KRW";
+  let res;
+  try {
+    res = await fetchWithTimeout(url);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+  } catch (e) {
+    try { res = await fetchViaProxies(url); }
+    catch (pe) {
+      // 마지막: 개인 프록시 경유 Naver 환율(매매기준율)
+      if (hasKrProxy() && isToday) {
         try {
-            res = await fetchViaProxies(url);
-        }
-        catch (proxyErr) {
-            throw new Error(`[FX] 직접 요청 실패(${e.message}), ${proxyErr.message}`);
-        }
+          const r2 = await fetchWithTimeout(krProxyBase() + "/fx/usdkrw", {}, 12000);
+          if (r2.ok) {
+            const j = await r2.json();
+            const v = toNum(j.closePrice || j.value);
+            if (isFinite(v) && v > 0) return { date: dateStr, fx: v };
+          }
+        } catch (e3) { /* ignore */ }
+      }
+      throw new Error("[환율] 직접 실패(" + errText(e) + "), " + pe.message);
     }
-    const data = await res.json();
-    const fx = data.rates && data.rates.KRW;
-    if (!fx)
-        throw new Error("[FX] 환율 데이터 없음");
-    return { date: data.date || dateStr, fx: Number(fx) };
+  }
+  const data = await res.json();
+  const fx = data.rates && data.rates.KRW;
+  if (!fx) throw new Error("[환율] 데이터 없음");
+  return { date: data.date || dateStr, fx: Number(fx) };
 }
+
+// ================================================================
+// 외부 인터페이스 (기존과 동일한 시그니처 — 호출부 수정 불필요)
+// ================================================================
 async function freePriceLookup(ticker, dateStr) {
-    const korean = isKoreanTicker(ticker);
-    const isToday = dateStr === todayStr();
-    if (!korean && isToday) {
-        try {
-            const price = await fetchFinnhubQuote(ticker);
-            const fxResult = await freeFxRate(dateStr);
-            return { date: dateStr, priceUSD: price, priceKRW: fxResult.fx ? price * fxResult.fx : 0, fx: fxResult.fx };
-        }
-        catch (e) {
-            // no key configured, rate-limited, or ticker not covered — fall through to Yahoo
-        }
-    }
-    const priceResult = korean ? await fetchKoreanClose(ticker, dateStr) : await fetchYahooClose(ticker, dateStr);
-    const fxResult = await freeFxRate(priceResult.date);
-    if (korean) {
-        return {
-            date: priceResult.date,
-            priceKRW: priceResult.close,
-            priceUSD: fxResult.fx ? priceResult.close / fxResult.fx : 0,
-            fx: fxResult.fx
-        };
-    }
+  const korean = isKoreanTicker(ticker);
+  const isToday = dateStr === todayStr();
+
+  if (!korean && isToday) {
+    try {
+      const price = await fetchFinnhubQuote(ticker);
+      const fxResult = await freeFxRate(dateStr);
+      return { date: dateStr, priceUSD: price, priceKRW: fxResult.fx ? price * fxResult.fx : 0, fx: fxResult.fx, source: "Finnhub" };
+    } catch (e) { /* Yahoo로 폴백 */ }
+  }
+
+  const priceResult = korean ? await fetchKoreanClose(ticker, dateStr) : await fetchYahooClose(ticker, dateStr);
+  const fxResult = await freeFxRate(priceResult.date);
+  if (korean) {
     return {
-        date: priceResult.date,
-        priceUSD: priceResult.close,
-        priceKRW: fxResult.fx ? priceResult.close * fxResult.fx : 0,
-        fx: fxResult.fx
+      date: priceResult.date,
+      priceKRW: priceResult.close,
+      priceUSD: fxResult.fx ? priceResult.close / fxResult.fx : 0,
+      fx: fxResult.fx,
+      source: priceResult.source
     };
+  }
+  return {
+    date: priceResult.date,
+    priceUSD: priceResult.close,
+    priceKRW: fxResult.fx ? priceResult.close * fxResult.fx : 0,
+    fx: fxResult.fx,
+    source: priceResult.source
+  };
 }
+
 async function freeFxLookup(dateStr) {
-    return await freeFxRate(dateStr);
+  return await freeFxRate(dateStr);
+}
+
+// ================================================================
+// 진단: 브라우저 콘솔에서 krDiag("005930") 실행 → 어떤 경로가 살아있는지 표로 출력
+// ================================================================
+if (typeof window !== "undefined") {
+  window.krQuote = krNaverQuote;      // 여러 종목 한 번에: krQuote(["005930","035720"])
+  window.krClose = fetchKoreanClose;  // krClose("005930", "2026-07-22")
+
+  window.krDiag = async function (code, dateStr) {
+    code = code || "005930";
+    dateStr = dateStr || todayStr();
+    const rows = [];
+    async function probe(name, fn) {
+      const t0 = Date.now();
+      try {
+        const r = await fn();
+        rows.push({ 경로: name, 결과: "성공", 종가: r.close, 일자: r.date, ms: Date.now() - t0 });
+      } catch (e) {
+        rows.push({ 경로: name, 결과: "실패", 종가: "-", 일자: "-", ms: Date.now() - t0, 사유: errText(e).slice(0, 160) });
+      }
+    }
+    console.log("개인 프록시:", hasKrProxy() ? krProxyBase() : "(미설정 — 공개 프록시 사용 중)");
+    await probe("Naver 실시간", async () => (await krNaverQuote([code]))[code] || Promise.reject(new Error("응답에 종목 없음")));
+    await probe("Naver 일봉", () => krNaverHistory(code, dateStr));
+    await probe("KRX 공식", () => krxClose(code, dateStr));
+    await probe("Yahoo .KS", () => fetchYahooClose(code + ".KS", dateStr));
+    await probe("Yahoo .KQ", () => fetchYahooClose(code + ".KQ", dateStr));
+    await probe("환율 USD/KRW", async () => { const f = await freeFxRate(dateStr); return { close: f.fx, date: f.date }; });
+    console.table(rows);
+    return rows;
+  };
 }
 // Looks up the nearest known USD/KRW rate at-or-before `date` in a
 // { date: rate } cache; falls back to the earliest known rate if nothing
